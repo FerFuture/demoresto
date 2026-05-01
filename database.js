@@ -161,6 +161,7 @@ async function getRecentInteractions({ restaurantId, customerNumber, botNumber, 
 }
 
 async function saveOrder(payload) {
+  const totalProducts = payload.totalAmount != null ? Number(payload.totalAmount) : null;
   const row = {
     restaurant_id: payload.restaurantId,
     customer_number: sanitizeWhatsAppId(payload.customerNumber),
@@ -171,11 +172,33 @@ async function saveOrder(payload) {
     status: payload.status || "pending",
     payment_method: payload.paymentMethod || null,
     payment_status: payload.paymentStatus || null,
-    total_price: payload.totalAmount || null,
-    total_amount: payload.totalAmount || null,
+    total_price: totalProducts,
+    total_amount: totalProducts,
     raw_request: payload.rawRequest || null,
     created_at: new Date().toISOString()
   };
+
+  if (payload.fulfillmentType != null) {
+    row.fulfillment_type = payload.fulfillmentType;
+  }
+  if (payload.subtotalAmount != null) {
+    row.subtotal_amount = Number(payload.subtotalAmount);
+  }
+  if ("deliveryFee" in payload) {
+    row.delivery_fee = payload.deliveryFee;
+  }
+  if ("finalTotalAmount" in payload) {
+    row.final_total_amount = payload.finalTotalAmount;
+  }
+  if ("paymentLink" in payload) {
+    row.payment_link = payload.paymentLink;
+  }
+  if ("customerNotifiedAt" in payload) {
+    row.customer_notified_at = payload.customerNotifiedAt;
+  }
+  if (payload.customerChatId) {
+    row.customer_chat_id = String(payload.customerChatId).trim() || null;
+  }
 
   const { data, error } = await supabase.from(TABLES.orders).insert(row).select("*").single();
   if (error) {
@@ -200,12 +223,47 @@ async function updateOrder(orderId, values) {
   return data;
 }
 
+/**
+ * UPDATE condicional (ej. solo si status sigue siendo X y aún no se notificó).
+ * Devuelve la fila actualizada o null si no hubo match (idempotencia / carrera).
+ */
+async function updateOrderMatching(orderId, patch, constraints = {}) {
+  let query = supabase.from(TABLES.orders).update(patch).eq("id", orderId);
+  if (constraints.expectStatus != null) {
+    query = query.eq("status", constraints.expectStatus);
+  }
+  if (constraints.requireCustomerNotifiedNull) {
+    query = query.is("customer_notified_at", null);
+  }
+  const { data, error } = await query.select("*").maybeSingle();
+  if (error) {
+    throw new Error(`Error actualizando pedido: ${error.message}`);
+  }
+  return data || null;
+}
+
+async function getRestaurantNameById(restaurantId) {
+  const { data, error } = await supabase
+    .from(TABLES.restaurants)
+    .select("name")
+    .eq("id", restaurantId)
+    .maybeSingle();
+  if (error) {
+    throw new Error(`Error consultando restaurante: ${error.message}`);
+  }
+  return data?.name || "Restaurante";
+}
+
 module.exports = {
+  supabase,
+  TABLES,
   getRestaurantByIncomingNumber,
   getRestaurantContext,
   getAvailableMenuItems,
   getRecentInteractions,
   saveInteraction,
   saveOrder,
-  updateOrder
+  updateOrder,
+  updateOrderMatching,
+  getRestaurantNameById
 };

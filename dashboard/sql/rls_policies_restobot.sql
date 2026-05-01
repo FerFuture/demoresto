@@ -1,8 +1,9 @@
--- Políticas RLS para RestoBot cuando el dashboard usa la clave "anon".
--- Ejecutá esto en Supabase → SQL Editor (una vez). Ajustá nombres de esquema/tabla si usás otros.
+-- Políticas RLS — Paso 2 (dashboard con clave anon)
+-- Ejecutá TODO este archivo en Supabase → SQL Editor (idempotente: podés re-ejecutar).
+-- Después corré `rls_step2_verify.sql` para comprobar políticas y RLS sin tocar datos.
 --
 -- El bot Node debería usar SUPABASE_SERVICE_ROLE_KEY (no pasa por RLS).
--- El dashboard Vite sigue con SUPABASE_KEY anon: necesita políticas explícitas si RLS está ON.
+-- El dashboard Vite usa SUPABASE_KEY (anon): si RLS está ON, hace falta estas políticas.
 --
 -- Seguridad: USING (true) permite a cualquiera con la clave anon leer/escribir esas tablas.
 -- Para producción pública endurecé (auth, por restaurant_id, etc.).
@@ -74,3 +75,32 @@ create policy "restobot_orders_auth_insert"
 drop policy if exists "restobot_orders_auth_update" on public.orders;
 create policy "restobot_orders_auth_update"
   on public.orders for update to authenticated using (true) with check (true);
+
+-- =============================================================================
+-- Verificación (solo lectura; seguro re-ejecutar)
+-- =============================================================================
+
+-- Políticas creadas para anon/authenticated en las tablas del dashboard
+select
+  schemaname,
+  tablename,
+  policyname,
+  roles,
+  cmd as operation
+from pg_policies
+where schemaname = 'public'
+  and tablename in ('orders', 'menu_items', 'restaurants', 'bot_interactions')
+  and policyname like 'restobot_%'
+order by tablename, policyname;
+
+-- RLS encendido en esas tablas (relrowsecurity = true)
+select
+  n.nspname as schema,
+  c.relname as table,
+  c.relrowsecurity as rls_enabled
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public'
+  and c.relkind = 'r'
+  and c.relname in ('orders', 'menu_items', 'restaurants', 'bot_interactions')
+order by c.relname;

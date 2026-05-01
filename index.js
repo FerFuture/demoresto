@@ -12,9 +12,12 @@ const {
   saveInteraction,
   saveOrder
 } = require("./database");
+const { startOrderDeliveryNotifier } = require("./order_delivery_notifier");
+const { startPaymentStatusPoller } = require("./payment_status_poller");
 const {
   MAX_AUDIO_SECONDS,
   transcribeAudioWithWhisper,
+  generateProductQuestionAnswer,
   generateAssistantResponse,
   generateOrderQuote,
   detectAddressIntent
@@ -39,7 +42,7 @@ const conversationState = new Map();
 const BUSINESS_HOURS = {
   timezone: process.env.BOT_TIMEZONE || "America/Argentina/Buenos_Aires",
 openTime: process.env.BOT_OPEN_TIME || "06:05",
-closeTime: process.env.BOT_CLOSE_TIME || "21:00",
+closeTime: process.env.BOT_CLOSE_TIME || "00:00",
   openDays: (process.env.BOT_OPEN_DAYS || "1,2,3,4,5,6,7")
     .split(",")
     .map((d) => Number(d.trim()))
@@ -163,10 +166,21 @@ function looksLikePhysicalAddress(text) {
   const hasStreetHint = /\b(calle|av|avenida|pasaje|pasillo|camino|direccion|dirección|entre|nro|numero|número|#)\b/.test(
     normalized
   );
+  const hasReferenceHint = /\b(frente|al lado|cerca|esquina|plaza|parque|mercado|edificio|torre|barrio|zona)\b/.test(
+    normalized
+  );
   const hasNumber = /\d{1,4}/.test(normalized);
+  const hasStreetLikeName = /\b[a-z]{4,}\s+\d{1,5}\b/.test(normalized);
   const longEnough = normalized.length >= 12;
 
-  return (hasStreetHint && longEnough) || (hasStreetHint && hasNumber);
+  // Regla flexible:
+  // - formato clasico: pista de calle + numero/largo suficiente
+  // - formato natural: referencia + numero
+  // - formato corto comun: "luzuriaga 333"
+  if ((hasStreetHint && longEnough) || (hasStreetHint && hasNumber)) return true;
+  if (hasReferenceHint && hasNumber && longEnough) return true;
+  if (hasStreetLikeName) return true;
+  return false;
 }
 
 function isConfirmedAddress(addressCheck, originalText) {
@@ -204,7 +218,45 @@ const INTENT_PHRASES = {
   delivery: ["delivery", "domicilio", "envio", "envio a domicilio", "a mi casa", "para la casa", "a casa"],
   local: ["local", "comer en el local", "retiro", "retirar", "paso a buscar", "voy al local", "para llevar"],
   cash: ["efectivo"],
-  mercadoPago: ["mercado pago", "mp"]
+  mercadoPago: ["mercado pago", "mp"],
+  /** Cancelar el armado del pedido (checkout en curso), no confundir con "no quiero mas productos". */
+  cancelCheckout: [
+    "cancelar",
+    "cancelá el pedido",
+    "cancela el pedido",
+    "quiero cancelar",
+    "cancelar pedido",
+    "cancelar todo",
+    "no quiero seguir",
+    "no deseo seguir",
+    "no sigo",
+    "no continuo",
+    "no quiero el pedido",
+    "no deseo el pedido",
+    "olvida el pedido",
+    "olvidate del pedido",
+    "deja el pedido",
+    "dejá el pedido",
+    "no me interesa el pedido",
+    "anular pedido",
+    "anular el pedido",
+    "no quiero pedir",
+    "no quiero comprar",
+    "mejor no",
+    "me arrepiento",
+    "no era eso",
+    "borra el pedido",
+    "cancelalo",
+    "chau con el pedido",
+    "suspende el pedido",
+    "ya no",
+    "no gracias ya no quiero",
+    "desisto",
+    "desistir",
+    "no quiero",
+    "no deseo",
+    "cancel"
+  ]
 };
 
 function hasAnyPhrase(text, phrases = []) {
@@ -236,6 +288,10 @@ function wantsToCloseOrder(text) {
 
 function wantsToConfirmSelection(text) {
   return hasAnyPhrase(text, INTENT_PHRASES.confirmSelection);
+}
+
+function wantsToCancelCheckout(text) {
+  return hasAnyPhrase(text, INTENT_PHRASES.cancelCheckout);
 }
 
 function getConversationKey(tenantId, customerNumber, botNumber) {
@@ -329,6 +385,8 @@ function botReplyIndicatesOrderHandedToRestaurant(botResponse) {
   if (t.includes("checkout/v1")) return true;
   if (t.includes("mercadopago") && (t.includes("checkout") || t.includes("redirect"))) return true;
   if (t.includes("tu pedido quedo registrado")) return true;
+  if (t.includes("costo de envio") || t.includes("costo de envío")) return true;
+  if (t.includes("confirma el local")) return true;
   if (t.includes("mercado pago") && t.includes("usa este link")) return true;
   if (t.includes("mercado pago") && t.includes("link")) return true;
   if (t.includes("init_point")) return true;
@@ -386,8 +444,19 @@ function shouldExpireCheckoutSessionByTtl(session) {
 }
 
 function formatTotal(totalAmount) {
-  return `$${new Intl.NumberFormat("es-CL").format(Math.round(Number(totalAmount) || 0))}`;
+  return new Intl.NumberFormat("es-AR", {
+    style: "currency",
+    currency: "ARS",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(Number(totalAmount) || 0);
 }
+
+const DELIVERY_PENDING_FEE_MESSAGE =
+  "Gracias. Tu pedido quedó registrado con delivery a domicilio. " +
+  "El costo de envío lo confirma el local en unos minutos. " +
+  "En cuanto lo tengamos te enviamos el total en pesos argentinos (ARS) y los datos para pagar o el link de Mercado Pago. " +
+  "Si no recibís nada en un rato, escribinos de nuevo por acá.";
 
 /**
  * Recalcula el total a partir de los items en la sesion y el menu vigente.
@@ -456,6 +525,169 @@ function buildAddMoreQuestion(details, totalAmount) {
   )}). ¿Querés agregar algo más?\n1. Sí, agregar más productos\n2. No, continuar`;
 }
 
+function formatOrderDetailsForDisplay(items, fallbackDetails) {
+  const names = (Array.isArray(items) ? items : [])
+    .map((n) => String(n || "").trim())
+    .filter(Boolean);
+  if (!names.length) {
+    return String(fallbackDetails || "tu pedido").trim() || "tu pedido";
+  }
+
+  const counts = new Map();
+  for (const name of names) {
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+
+  const orderedUnique = [];
+  const seen = new Set();
+  for (const name of names) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    orderedUnique.push(name);
+  }
+
+  return orderedUnique
+    .map((name) => {
+      const qty = counts.get(name) || 1;
+      return qty > 1 ? `${name} x${qty}` : name;
+    })
+    .join(", ");
+}
+
+function wantsMenuList(text) {
+  const t = normalizeTextForMatch(text).replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  return (
+    t.includes("menu") ||
+    t.includes("menú") ||
+    t.includes("carta") ||
+    t.includes("lista de productos") ||
+    t.includes("que tienen") ||
+    t.includes("que hay")
+  );
+}
+
+/** Normaliza categoria de DB y filtro (combos, pizza) para comparar. */
+function normalizeMenuCategoryValue(value) {
+  return normalizeTextForMatch(String(value || "").trim());
+}
+
+function itemMatchesMenuCategoryFilter(item, filterKey) {
+  const cat = normalizeMenuCategoryValue(item?.category);
+  const want = normalizeMenuCategoryValue(filterKey);
+  if (!cat || !want) return false;
+  if (cat === want) return true;
+  if (cat.includes(want) || want.includes(cat)) return true;
+  return false;
+}
+
+/**
+ * Si el usuario pide ver combos / pizzas (seccion), devuelve la clave de categoria.
+ * No aplica cuando parece un pedido ("quiero pizza italiana").
+ */
+function inferMenuCategoryFilter(text, rawText = "") {
+  const t = normalizeTextForMatch(text).replace(/\s+/g, " ").trim();
+  if (!t) return null;
+
+  if (/^(quiero|dame|pedir|necesito|mandame|traeme)\b/.test(t)) return null;
+  if (/\bpizza\s+(boliviana|italiana|comun)\b/.test(t)) return null;
+  if (/\b(quiero|dame)\s+(una|dos|tres|\d+)\s*pizza\b/.test(t)) return null;
+
+  if (
+    /\bcombos?\b/.test(t) ||
+    /\bmenu\s+de\s+combos?\b/.test(t) ||
+    /\bmenú\s+de\s+combos?\b/.test(t) ||
+    /\blos\s+combos?\b/.test(t) ||
+    /\blas\s+combos?\b/.test(t) ||
+    /\bopciones?\s+de\s+combo\b/.test(t) ||
+    /\b(seccion|sección)\s+combos?\b/.test(t)
+  ) {
+    return "combos";
+  }
+
+  if (!/\bpizzas?\b/.test(t)) return null;
+
+  const browsePizza =
+    /\b(ver|mostrar|menu|menú|carta|lista|tienen|hay|precio|cuanto|cuesta|todas|seccion|sección)\b/.test(t) ||
+    /\b(menu|menú)\s+(de\s+)?pizzas?\b/.test(t) ||
+    /^(\s*)(las?\s+)?pizzas?\s*[!?.]*\s*$/i.test(String(rawText || "").trim()) ||
+    /^(\s*)pizza\s*[!?.]*\s*$/i.test(String(rawText || "").trim()) ||
+    (t.length <= 24 && !/\b(quiero|dame|pedi|pedir|necesito|mandame)\b/.test(t));
+
+  if (browsePizza) return "pizza";
+  return null;
+}
+
+/**
+ * @returns {null | { scope: 'full' } | { scope: 'category', category: string }}
+ */
+function resolveMenuListIntent(text) {
+  const t = normalizeTextForMatch(text).replace(/\s+/g, " ").trim();
+  if (!t) return null;
+
+  const category = inferMenuCategoryFilter(t, text);
+  if (category) {
+    return { scope: "category", category };
+  }
+
+  if (wantsMenuList(text)) {
+    return { scope: "full" };
+  }
+  return null;
+}
+
+/**
+ * Pregunta sobre un producto ya nombrado en el mensaje (ingredientes, como es, etc.).
+ * Se usa junto con findMentionedMenuItem para no disparar en "que tienen" del menu general.
+ */
+function isProductDetailQuestion(text) {
+  const t = normalizeTextForMatch(text).replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  return /\b(como\s+es|como\s+viene|como\s+son|que\s+es|qué\s+es|que\s+tiene|qué\s+tiene|que\s+trae|qué\s+trae|que\s+lleva|qué\s+lleva|de\s+que\s+esta|de\s+qué\s+está|de\s+que\s+es|de\s+qué\s+es|de\s+que\s+va|con\s+que\s+viene|viene\s+con|trae\s+eso|ingredientes|incluye|que\s+onda\s+con)\b/.test(
+    t
+  );
+}
+
+function findMentionedMenuItem(text, menuItems = []) {
+  const normalizedText = normalizeForItemMatch(text);
+  if (!normalizedText) return null;
+
+  const sorted = [...(menuItems || [])]
+    .filter((item) => String(item?.name || "").trim())
+    .sort((a, b) => normalizeForItemMatch(b.name).length - normalizeForItemMatch(a.name).length);
+
+  for (const item of sorted) {
+    const name = normalizeForItemMatch(item.name);
+    if (!name) continue;
+    if (normalizedText.includes(name)) return item;
+  }
+
+  return null;
+}
+
+function buildMenuLinesForWhatsApp(menuItems = [], tenant = null, options = {}) {
+  const brand =
+    (process.env.RESTAURANT_PUBLIC_NAME || "").trim() || tenant?.name || "Restaurante Palermo";
+  const bot = (process.env.BOT_DISPLAY_NAME || "RestoBot").trim();
+  const header = `*${bot} · ${brand}*\n\n`;
+  const valid = (menuItems || []).filter((item) => Number(item?.price) > 0 && String(item?.name || "").trim());
+  const sectionKey = (options.sectionKey || "").trim();
+  const sectionLabel =
+    options.sectionLabel ||
+    (sectionKey ? sectionKey.charAt(0).toUpperCase() + sectionKey.slice(1) : "");
+  if (!valid.length) {
+    const emptyMsg = sectionKey
+      ? `Todavia no hay productos cargados en la categoria *${sectionLabel}*. Escribi *menu* para ver todo el listado.`
+      : "Ahora mismo no hay productos disponibles en el menu.";
+    return `${header}${emptyMsg}`;
+  }
+  const lines = valid.map((item) => `- ${item.name} (${formatTotal(item.price)})`);
+  const intro = sectionKey
+    ? `Aqui tenes la seccion *${sectionLabel}*:\n${lines.join("\n")}`
+    : `Aqui tienes el menu disponible:\n${lines.join("\n")}`;
+  return `${header}${intro}`;
+}
+
 function detectFulfillmentIntent(text) {
   if (hasAnyPhrase(text, INTENT_PHRASES.delivery)) return "delivery";
   if (hasAnyPhrase(text, INTENT_PHRASES.local)) return "local";
@@ -469,6 +701,66 @@ function normalizeTextForMatch(text) {
     .toLowerCase();
 }
 
+function normalizeForItemMatch(text) {
+  return normalizeTextForMatch(text)
+    .replace(/s\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const SPANISH_QTY_WORDS = {
+  un: 1,
+  una: 1,
+  uno: 1,
+  dos: 2,
+  tres: 3,
+  cuatro: 4,
+  cinco: 5,
+  seis: 6,
+  siete: 7,
+  ocho: 8,
+  nueve: 9,
+  diez: 10
+};
+
+const QTY_FILLER_TOKENS = new Set([
+  "quiero",
+  "dame",
+  "me",
+  "das",
+  "por",
+  "favor",
+  "de",
+  "del",
+  "la",
+  "el",
+  "los",
+  "las",
+  "y",
+  "con",
+  "entonces",
+  "dale"
+]);
+
+function extractQuantityBeforePosition(normalizedText, position) {
+  if (position <= 0) return 1;
+  const window = normalizedText.slice(Math.max(0, position - 40), position).trim();
+  if (!window) return 1;
+  const tokens = window.split(/\s+/);
+  for (let i = tokens.length - 1; i >= 0; i -= 1) {
+    const t = tokens[i];
+    if (!t) continue;
+    if (/^\d+$/.test(t)) {
+      const n = parseInt(t, 10);
+      if (Number.isFinite(n) && n > 0) return Math.min(20, n);
+      return 1;
+    }
+    if (SPANISH_QTY_WORDS[t] !== undefined) return SPANISH_QTY_WORDS[t];
+    if (!QTY_FILLER_TOKENS.has(t)) break;
+  }
+  return 1;
+}
+
 /** Evita disparar cierre de pedido / quote con direccion falsa en saludos cortos. */
 function isTrivialGreeting(text) {
   const t = normalizeTextForMatch(text).trim();
@@ -477,28 +769,31 @@ function isTrivialGreeting(text) {
 }
 
 function detectDirectMenuOrder(text, menuItems = []) {
-  let working = normalizeTextForMatch(text);
+  let working = normalizeForItemMatch(text);
   if (!working) return null;
 
   // Ordenamos por nombre mas largo primero para que "pizza italiana" no quede
   // tapado por un match temprano de "pizza".
   const sortedMenu = [...(menuItems || [])]
     .filter((item) => {
-      const name = normalizeTextForMatch(item?.name);
+      const name = normalizeForItemMatch(item?.name);
       const price = Number(item?.price || 0);
       return name && Number.isFinite(price) && price > 0;
     })
     .sort(
-      (a, b) => normalizeTextForMatch(b.name).length - normalizeTextForMatch(a.name).length
+      (a, b) => normalizeForItemMatch(b.name).length - normalizeForItemMatch(a.name).length
     );
 
   const foundItems = [];
   for (const item of sortedMenu) {
-    const normalizedName = normalizeTextForMatch(item.name);
+    const normalizedName = normalizeForItemMatch(item.name);
     // Permite repetidos: "dos sopas de mani" o "sopa de mani y sopa de mani".
     let idx = working.indexOf(normalizedName);
     while (idx !== -1) {
-      foundItems.push(item);
+      const qty = extractQuantityBeforePosition(working, idx);
+      for (let i = 0; i < qty; i += 1) {
+        foundItems.push(item);
+      }
       working =
         working.slice(0, idx) + " ".repeat(normalizedName.length) + working.slice(idx + normalizedName.length);
       idx = working.indexOf(normalizedName);
@@ -569,7 +864,7 @@ async function handleAudioMessage(message, restaurantContext, tenant, customerNu
     // Enrutamos el audio transcrito por el mismo flujo de checkout de texto
     // para mantener consistencia (agregar items, delivery/local, direccion, pago).
     return handleTextMessage(
-      { body: transcriptText },
+      { body: transcriptText, from: message.from },
       restaurantContext,
       tenant,
       customerNumber,
@@ -584,6 +879,9 @@ async function handleAudioMessage(message, restaurantContext, tenant, customerNu
 async function handleTextMessage(message, restaurantContext, tenant, customerNumber, botNumber, recentHistory) {
   const text = message.body || "";
   const trimmedText = text.trim();
+  // chatId crudo de WhatsApp (e.g. "5491155551234@c.us" o "208460633350292@lid").
+  // Lo guardamos en la orden para responder despues sin adivinar el sufijo.
+  const customerChatId = (message?.from || "").trim() || null;
   const conversationKey = getConversationKey(tenant.id, customerNumber, botNumber);
   const menuItems = restaurantContext?.menuItems || [];
   let session = getOrCreateSession(conversationKey);
@@ -616,6 +914,98 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
   const fulfillmentIntent = detectFulfillmentIntent(trimmedText);
   const option = numericOption(trimmedText);
 
+  if (wantsToCancelCheckout(trimmedText) && sessionLooksActiveForCheckout(session)) {
+    resetCheckoutSession(conversationKey);
+    conversationState.delete(conversationKey);
+    const cancelReply =
+      "Listo, cancelamos el pedido que tenias armado. Cuando quieras, escribime de nuevo y arrancamos de cero.";
+    await saveInteraction({
+      restaurantId: tenant.id,
+      customerNumber,
+      botNumber,
+      messageType: "text",
+      userMessage: text,
+      botResponse: cancelReply,
+      metadata: {
+        status: "browsing",
+        checkoutCancelled: true,
+        totalAmount: 0,
+        items: [],
+        details: ""
+      }
+    });
+    return cancelReply;
+  }
+
+  const menuListIntent = resolveMenuListIntent(trimmedText);
+  if (menuListIntent) {
+    let itemsForMessage = menuItems;
+    let menuMeta = { menuShown: true, menuScope: menuListIntent.scope };
+    if (menuListIntent.scope === "category") {
+      itemsForMessage = menuItems.filter((item) =>
+        itemMatchesMenuCategoryFilter(item, menuListIntent.category)
+      );
+      menuMeta.menuCategory = menuListIntent.category;
+    }
+    const menuReply = buildMenuLinesForWhatsApp(itemsForMessage, tenant, {
+      sectionKey: menuListIntent.scope === "category" ? menuListIntent.category : "",
+      sectionLabel:
+        menuListIntent.scope === "category"
+          ? menuListIntent.category === "combos"
+            ? "combos"
+            : menuListIntent.category === "pizza"
+              ? "pizzas"
+              : menuListIntent.category
+          : ""
+    });
+    await saveInteraction({
+      restaurantId: tenant.id,
+      customerNumber,
+      botNumber,
+      messageType: "text",
+      userMessage: text,
+      botResponse: menuReply,
+      metadata: sessionMetadata(session, menuMeta)
+    });
+    return menuReply;
+  }
+
+  const mentionedProductForDetail = findMentionedMenuItem(trimmedText, menuItems);
+  if (mentionedProductForDetail && isProductDetailQuestion(trimmedText)) {
+    let dishReply;
+    try {
+      dishReply = await generateProductQuestionAnswer({
+        customerMessage: text,
+        menuItem: mentionedProductForDetail,
+        restaurantContext
+      });
+    } catch (detailErr) {
+      console.error("Error generateProductQuestionAnswer:", detailErr);
+      const d = String(mentionedProductForDetail.description || "").trim();
+      const priceHint =
+        mentionedProductForDetail.price != null
+          ? ` Sale ${formatTotal(mentionedProductForDetail.price)}.`
+          : "";
+      dishReply = d
+        ? `${mentionedProductForDetail.name}: te resumo lo que figura: ${d.slice(0, 220)}${d.length > 220 ? "..." : ""}${priceHint}`
+        : `${mentionedProductForDetail.name}: no tenemos el detalle cargado.${priceHint} Si queres lo pedimos igual.`;
+    }
+    await saveInteraction({
+      restaurantId: tenant.id,
+      customerNumber,
+      botNumber,
+      messageType: "text",
+      userMessage: text,
+      botResponse: dishReply,
+      metadata: sessionMetadata(session, {
+        dishDescriptionShown: true,
+        dishName: mentionedProductForDetail.name,
+        productDetailAnswer: true
+      })
+    });
+    return dishReply;
+  }
+
   // Recupera el flujo si llega una opcion corta aunque el estado previo se haya desfasado.
   if (session.totalAmount > 0 && session.status === "browsing") {
     if (option === 1 || fulfillmentIntent === "delivery") {
@@ -635,7 +1025,10 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       session.details = session.items.join(", ");
       session.conversationText = updatedMessages.join(" | ");
 
-      const addMoreQuestion = buildAddMoreQuestion(session.details, session.totalAmount);
+      const addMoreQuestion = buildAddMoreQuestion(
+        formatOrderDetailsForDisplay(session.items, session.details),
+        session.totalAmount
+      );
       await saveInteraction({
         restaurantId: tenant.id,
         customerNumber,
@@ -649,6 +1042,21 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
     }
 
     if (wantsToCloseOrder(text) || option === 2 || hasAnyPhrase(text, INTENT_PHRASES.noMore)) {
+      ensureSessionTotals(session, menuItems);
+      if (!Number(session.totalAmount) || Number(session.totalAmount) <= 0) {
+        const missingTotalReply =
+          "No pude calcular el total del pedido en este paso. Confirmame nuevamente los productos para continuar.";
+        await saveInteraction({
+          restaurantId: tenant.id,
+          customerNumber,
+          botNumber,
+          messageType: "text",
+          userMessage: text,
+          botResponse: missingTotalReply,
+          metadata: sessionMetadata(session, { missingTotalBeforeFulfillment: true })
+        });
+        return missingTotalReply;
+      }
       session.status = "awaiting_fulfillment";
       const fulfillmentQuestion = buildFulfillmentQuestion(session.totalAmount);
       await saveInteraction({
@@ -665,7 +1073,7 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
 
     if (option === 1 || hasAnyPhrase(text, [...INTENT_PHRASES.confirmSelection, ...INTENT_PHRASES.addMore])) {
       session.status = "browsing";
-      const addMoreReply = "Perfecto, decime qué más querés agregar.";
+      const addMoreReply = `${buildMenuLinesForWhatsApp(menuItems, tenant)}\n\nPerfecto, decime qué más querés agregar.`;
       await saveInteraction({
         restaurantId: tenant.id,
         customerNumber,
@@ -679,6 +1087,21 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
     }
 
     if (option === 2 || hasAnyPhrase(text, INTENT_PHRASES.noMore)) {
+      ensureSessionTotals(session, menuItems);
+      if (!Number(session.totalAmount) || Number(session.totalAmount) <= 0) {
+        const missingTotalReply =
+          "No pude calcular el total del pedido en este paso. Confirmame nuevamente los productos para continuar.";
+        await saveInteraction({
+          restaurantId: tenant.id,
+          customerNumber,
+          botNumber,
+          messageType: "text",
+          userMessage: text,
+          botResponse: missingTotalReply,
+          metadata: sessionMetadata(session, { missingTotalBeforeFulfillment: true })
+        });
+        return missingTotalReply;
+      }
       session.status = "awaiting_fulfillment";
       const fulfillmentQuestion = buildFulfillmentQuestion(session.totalAmount);
       await saveInteraction({
@@ -730,7 +1153,10 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       }
 
       session.status = "awaiting_payment";
-      const paymentQuestion = buildPaymentQuestion(session.details, session.totalAmount);
+      const paymentQuestion = buildPaymentQuestion(
+        formatOrderDetailsForDisplay(session.items, session.details),
+        session.totalAmount
+      );
       await saveInteraction({
         restaurantId: tenant.id,
         customerNumber,
@@ -747,7 +1173,10 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       session.fulfillmentType = "local";
       session.deliveryAddress = "";
       session.status = "awaiting_payment";
-      const paymentQuestion = buildPaymentQuestion(session.details, session.totalAmount);
+      const paymentQuestion = buildPaymentQuestion(
+        formatOrderDetailsForDisplay(session.items, session.details),
+        session.totalAmount
+      );
       await saveInteraction({
         restaurantId: tenant.id,
         customerNumber,
@@ -762,7 +1191,7 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
 
     if (hasAnyPhrase(text, INTENT_PHRASES.addMore)) {
       session.status = "browsing";
-      const addMoreReply = "Perfecto, decime qué más querés agregar.";
+      const addMoreReply = `${buildMenuLinesForWhatsApp(menuItems, tenant)}\n\nPerfecto, decime qué más querés agregar.`;
       await saveInteraction({
         restaurantId: tenant.id,
         customerNumber,
@@ -789,21 +1218,63 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
   }
 
   if (session.status === "awaiting_payment") {
+    const isLocal = session.fulfillmentType === "local";
+    const orderNotesBase = `Detalle: ${session.details} | Modalidad: ${
+      session.fulfillmentType === "local" ? "comer_en_local" : "delivery"
+    }${session.deliveryAddress ? ` | Direccion: ${session.deliveryAddress}` : ""}`;
+    const baseOrderPayload = {
+      restaurantId: tenant.id,
+      customerNumber,
+      customerChatId,
+      botNumber,
+      items: session.items?.length ? session.items : [session.details],
+      notes: orderNotesBase,
+      address: session.deliveryAddress || null,
+      rawRequest: session.conversationText,
+      totalAmount: session.totalAmount
+    };
+
     if (option === 1 || hasAnyPhrase(text, INTENT_PHRASES.cash)) {
+      if (!isLocal) {
+        const order = await saveOrder({
+          ...baseOrderPayload,
+          status: "awaiting_delivery_fee",
+          paymentMethod: "efectivo",
+          paymentStatus: "pending",
+          fulfillmentType: "delivery",
+          subtotalAmount: session.totalAmount,
+          deliveryFee: null,
+          finalTotalAmount: null,
+          paymentLink: null,
+          customerNotifiedAt: null
+        });
+
+        await saveInteraction({
+          restaurantId: tenant.id,
+          customerNumber,
+          botNumber,
+          messageType: "text",
+          userMessage: text,
+          botResponse: DELIVERY_PENDING_FEE_MESSAGE,
+          metadata: {
+            orderId: order.id,
+            paymentChoice: "cash",
+            fulfillmentType: "delivery",
+            details: session.details,
+            deliveryAwaitingFee: true
+          }
+        });
+
+        resetCheckoutSession(conversationKey);
+        conversationState.delete(conversationKey);
+        return DELIVERY_PENDING_FEE_MESSAGE;
+      }
+
       const order = await saveOrder({
-        restaurantId: tenant.id,
-        customerNumber,
-        botNumber,
-        items: session.items?.length ? session.items : [session.details],
-        notes: `Detalle: ${session.details} | Modalidad: ${
-          session.fulfillmentType === "local" ? "comer_en_local" : "delivery"
-        }${session.deliveryAddress ? ` | Direccion: ${session.deliveryAddress}` : ""}`,
-        address: session.deliveryAddress || null,
-        rawRequest: session.conversationText,
+        ...baseOrderPayload,
         status: "pending",
         paymentMethod: "efectivo",
-        paymentStatus: "pending",
-        totalAmount: session.totalAmount
+        paymentStatus: "pending"
       });
 
       const cashReply = "Perfecto, pago en efectivo al recibir. Tu pedido quedo registrado y en preparacion.";
@@ -843,20 +1314,46 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
         return missingTotalReply;
       }
 
+      if (!isLocal) {
+        const order = await saveOrder({
+          ...baseOrderPayload,
+          status: "awaiting_delivery_fee",
+          paymentMethod: "mercadopago",
+          paymentStatus: "pending",
+          fulfillmentType: "delivery",
+          subtotalAmount: session.totalAmount,
+          deliveryFee: null,
+          finalTotalAmount: null,
+          paymentLink: null,
+          customerNotifiedAt: null
+        });
+
+        await saveInteraction({
+          restaurantId: tenant.id,
+          customerNumber,
+          botNumber,
+          messageType: "text",
+          userMessage: text,
+          botResponse: DELIVERY_PENDING_FEE_MESSAGE,
+          metadata: {
+            orderId: order.id,
+            paymentChoice: "mercadopago",
+            fulfillmentType: "delivery",
+            details: session.details,
+            deliveryAwaitingFee: true
+          }
+        });
+
+        resetCheckoutSession(conversationKey);
+        conversationState.delete(conversationKey);
+        return DELIVERY_PENDING_FEE_MESSAGE;
+      }
+
       const order = await saveOrder({
-        restaurantId: tenant.id,
-        customerNumber,
-        botNumber,
-        items: session.items?.length ? session.items : [session.details],
-        notes: `Detalle: ${session.details} | Modalidad: ${
-          session.fulfillmentType === "local" ? "comer_en_local" : "delivery"
-        }${session.deliveryAddress ? ` | Direccion: ${session.deliveryAddress}` : ""}`,
-        address: session.deliveryAddress || null,
-        rawRequest: session.conversationText,
+        ...baseOrderPayload,
         status: "pending",
         paymentMethod: "mercadopago",
-        paymentStatus: "pending",
-        totalAmount: session.totalAmount
+        paymentStatus: "pending"
       });
 
       let paymentUrl;
@@ -921,7 +1418,10 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       session.status = "awaiting_payment";
       session.fulfillmentType = session.fulfillmentType || "delivery";
 
-      const paymentQuestion = buildPaymentQuestion(session.details, session.totalAmount);
+      const paymentQuestion = buildPaymentQuestion(
+        formatOrderDetailsForDisplay(session.items, session.details),
+        session.totalAmount
+      );
       await saveInteraction({
         restaurantId: tenant.id,
         customerNumber,
@@ -954,7 +1454,10 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       session.fulfillmentType = "delivery";
       session.deliveryAddress = addressCheck.normalizedAddress || text;
       session.status = "awaiting_payment";
-      const paymentQuestion = buildPaymentQuestion(session.details, session.totalAmount);
+      const paymentQuestion = buildPaymentQuestion(
+        formatOrderDetailsForDisplay(session.items, session.details),
+        session.totalAmount
+      );
       await saveInteraction({
         restaurantId: tenant.id,
         customerNumber,
@@ -987,7 +1490,10 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       session.fulfillmentType = "local";
       session.deliveryAddress = "";
       session.status = "awaiting_payment";
-      const paymentQuestion = buildPaymentQuestion(session.details, session.totalAmount);
+      const paymentQuestion = buildPaymentQuestion(
+        formatOrderDetailsForDisplay(session.items, session.details),
+        session.totalAmount
+      );
       await saveInteraction({
         restaurantId: tenant.id,
         customerNumber,
@@ -1022,7 +1528,10 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
     }
 
     session.status = "awaiting_add_more";
-    const addMoreQuestion = buildAddMoreQuestion(session.details, session.totalAmount);
+    const addMoreQuestion = buildAddMoreQuestion(
+      formatOrderDetailsForDisplay(session.items, session.details),
+      session.totalAmount
+    );
     await saveInteraction({
       restaurantId: tenant.id,
       customerNumber,
@@ -1085,7 +1594,10 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
     session.deliveryAddress = quote.deliveryAddress || (hasConfirmedAddress ? addressCheck.normalizedAddress || text : "");
     session.conversationText = updatedMessages.join(" | ");
 
-    const addMoreQuestion = buildAddMoreQuestion(session.details, session.totalAmount);
+    const addMoreQuestion = buildAddMoreQuestion(
+      formatOrderDetailsForDisplay(session.items, session.details),
+      session.totalAmount
+    );
     await saveInteraction({
       restaurantId: tenant.id,
       customerNumber,
@@ -1158,7 +1670,7 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       // Reintento recursivo con estado recuperado. Marca para evitar loops infinitos.
       if (!message.__recovered) {
         return handleTextMessage(
-          { body: text, __recovered: true },
+          { body: text, from: message.from, __recovered: true },
           restaurantContext,
           tenant,
           customerNumber,
@@ -1185,7 +1697,8 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
   const answer = await generateAssistantResponse({
     customerMessage: text,
     restaurantContext,
-    chatHistory: recentHistory
+    chatHistory: recentHistory,
+    isFirstContact: !recentHistory?.length
   });
 
   await saveInteraction({
@@ -1216,8 +1729,26 @@ client.on("qr", (qr) => {
   qrcode.generate(qr, { small: true });
 });
 
+let stopDeliveryNotifier = null;
+let stopPaymentPoller = null;
 client.on("ready", () => {
   console.log("WhatsApp conectado y listo.");
+  try {
+    if (typeof stopDeliveryNotifier === "function") {
+      stopDeliveryNotifier();
+    }
+  } catch (_) {
+    // ignore
+  }
+  try {
+    if (typeof stopPaymentPoller === "function") {
+      stopPaymentPoller();
+    }
+  } catch (_) {
+    // ignore
+  }
+  stopDeliveryNotifier = startOrderDeliveryNotifier(client);
+  stopPaymentPoller = startPaymentStatusPoller(client);
 });
 
 client.on("authenticated", () => {
