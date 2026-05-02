@@ -10,7 +10,9 @@ const {
   getAvailableMenuItems,
   getRecentInteractions,
   saveInteraction,
-  saveOrder
+  saveOrder,
+  getOrderAwaitingCustomerTotalConfirm,
+  updateOrderMatching
 } = require("./database");
 const { startOrderDeliveryNotifier } = require("./order_delivery_notifier");
 const { startPaymentStatusPoller } = require("./payment_status_poller");
@@ -20,7 +22,9 @@ const {
   generateProductQuestionAnswer,
   generateAssistantResponse,
   generateOrderQuote,
-  detectAddressIntent
+  detectAddressIntent,
+  resolvePublicBrandName,
+  resolveBotDisplayName
 } = require("./ia_service");
 const { createPaymentPreference } = require("./payment_service");
 
@@ -42,7 +46,7 @@ const conversationState = new Map();
 const BUSINESS_HOURS = {
   timezone: process.env.BOT_TIMEZONE || "America/Argentina/Buenos_Aires",
 openTime: process.env.BOT_OPEN_TIME || "06:05",
-closeTime: process.env.BOT_CLOSE_TIME || "00:00",
+closeTime: process.env.BOT_CLOSE_TIME || "05:50",
   openDays: (process.env.BOT_OPEN_DAYS || "1,2,3,4,5,6,7")
     .split(",")
     .map((d) => Number(d.trim()))
@@ -136,6 +140,108 @@ function extractCustomerNumber(message) {
   return normalizeNumber((message.from || "").split("@")[0]);
 }
 
+/**
+ * Devuelve el telefono real del cliente para que el repartidor pueda
+ * llamarlo/WhatsAppearlo. Prueba multiples metodos de whatsapp-web.js para
+ * sortear los casos `@lid` (privacidad de numero activada). Si nada funciona,
+ * devuelve null y loggea con detalle para diagnostico.
+ *
+ * Heuristica de "es telefono valido": entre 8 y 14 digitos. Los LIDs suelen
+ * tener 15+ digitos sin estructura de pais; con esa cota descartamos LIDs.
+ */
+function looksLikePhoneDigits(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length < 8 || digits.length > 14) return null;
+  return digits;
+}
+
+async function resolveCustomerPhone(message, waClient) {
+  const from = String(message?.from || "");
+  if (!from) return null;
+
+  if (from.endsWith("@c.us")) {
+    const digits = normalizeNumber(from.split("@")[0]);
+    return looksLikePhoneDigits(digits);
+  }
+
+  const attempts = [];
+  let contact = null;
+
+  try {
+    if (typeof message?.getContact === "function") {
+      contact = await message.getContact();
+      attempts.push({
+        source: "message.getContact",
+        number: contact?.number ?? null,
+        idUser: contact?.id?.user ?? null,
+        idServer: contact?.id?.server ?? null,
+        idSerialized: contact?.id?._serialized ?? null,
+        pushname: contact?.pushname ?? null,
+        verifiedName: contact?.verifiedName ?? null,
+        shortName: contact?.shortName ?? null
+      });
+    }
+  } catch (err) {
+    attempts.push({ source: "message.getContact", error: String(err?.message || err) });
+  }
+
+  if (waClient) {
+    try {
+      if (typeof waClient.getContactById === "function") {
+        const c2 = await waClient.getContactById(from);
+        attempts.push({
+          source: "client.getContactById(from)",
+          number: c2?.number ?? null,
+          idUser: c2?.id?.user ?? null,
+          idServer: c2?.id?.server ?? null,
+          idSerialized: c2?.id?._serialized ?? null
+        });
+        if (!contact) contact = c2;
+      }
+    } catch (err) {
+      attempts.push({ source: "client.getContactById(from)", error: String(err?.message || err) });
+    }
+
+    try {
+      if (typeof waClient.getNumberId === "function") {
+        const numericPart = from.split("@")[0];
+        const probe = await waClient.getNumberId(numericPart);
+        attempts.push({
+          source: "client.getNumberId(numericPart)",
+          serialized: probe?._serialized ?? null,
+          user: probe?.user ?? null
+        });
+        const ser = probe?._serialized || "";
+        if (ser.endsWith("@c.us")) {
+          const digits = looksLikePhoneDigits(ser.split("@")[0]);
+          if (digits) {
+            console.log("[resolveCustomerPhone] resolved via getNumberId", { from, digits });
+            return digits;
+          }
+        }
+      }
+    } catch (err) {
+      attempts.push({ source: "client.getNumberId(numericPart)", error: String(err?.message || err) });
+    }
+  }
+
+  const candidates = [
+    contact?.number,
+    contact?.id?._serialized?.endsWith("@c.us") ? contact.id._serialized.split("@")[0] : null,
+    contact?.id?.user
+  ];
+  for (const cand of candidates) {
+    const digits = looksLikePhoneDigits(cand);
+    if (digits) {
+      console.log("[resolveCustomerPhone] resolved", { from, digits, attempts });
+      return digits;
+    }
+  }
+
+  console.log("[resolveCustomerPhone] no phone found", { from, attempts });
+  return null;
+}
+
 function isEmojiOnly(text) {
   const cleaned = (text || "").replace(/\s/g, "");
   if (!cleaned) return false;
@@ -187,6 +293,89 @@ function isConfirmedAddress(addressCheck, originalText) {
   if (!addressCheck?.isAddress) return false;
   const candidate = addressCheck.normalizedAddress || originalText || "";
   return looksLikePhysicalAddress(candidate);
+}
+
+/**
+ * Detecta saludos "puros" (texto que es solo un saludo, sin pregunta concreta
+ * adentro). Si matchea, lo respondemos con texto fijo usando los datos del
+ * restaurante activo y NO se llama al modelo IA. Ahorra tokens en el caso mas
+ * comun de mensaje sin intencion clara.
+ *
+ * Casos que matchean:  "hola", "Buenas!!", "buenos dias", "che", "que tal"
+ * Casos que NO matchean: "hola, tienen pizza?", "buenas, hacen delivery a X"
+ */
+const GREETING_REGEX =
+  /^(hola+|holis|holi|holaaa+|holu|buen[oa]s?|buen[oa]s\s+d[ií]as?|buen\s+d[ií]a|buenas\s+tardes|buenas\s+noches|que\s*tal|qu[eé]\s*tal|hey+|hi|hello|saludos|che)\b[\s!.?¡¿]*$/i;
+
+/** "hola buenas", "hey buenas", etc.: saludo compuesto sin pedido (sin gastar IA). */
+const GREETING_TWO_WORD_REGEX =
+  /^(hola|hol[au]|hey|buen[oa]s|qu[eé]\s*tal)\s+(buen[oa]s|tardes|noches|d[ií]as?|che)\b[\s!.?¡¿]*$/i;
+
+function isPureGreeting(text) {
+  const t = String(text || "").trim();
+  if (!t || t.length > 40) return false;
+  if (GREETING_REGEX.test(t)) return true;
+  if (GREETING_TWO_WORD_REGEX.test(t)) return true;
+  return false;
+}
+
+/**
+ * Construye la respuesta de saludo usando el nombre publico del restaurante
+ * configurado en el dashboard (`restaurants.public_name`, fallback a `name`).
+ * No llama a OpenAI: cero tokens.
+ */
+function buildGreetingReply(restaurantContext) {
+  const botName = resolveBotDisplayName();
+  const brandName = resolvePublicBrandName(restaurantContext);
+  return [
+    `*${botName} · ${brandName}*`,
+    "",
+    `¡Hola! Soy ${botName}, asistente de ${brandName}.`,
+    `Escribime *menú* para ver los productos disponibles o decime directamente qué querés pedir.`
+  ].join("\n");
+}
+
+/**
+ * Pre-filtro local: descarta mensajes que claramente NO son direcciones para
+ * evitar pagar una llamada de IA. Cubre saludos, opciones numericas, "ok",
+ * "menu", etc. Si pasa este filtro, recien ahi consideramos llamar al detector.
+ */
+const NON_ADDRESS_SHORT_TOKENS = new Set([
+  "hola", "holaa", "buenas", "ok", "okk", "okey", "dale", "si", "sí", "sii", "no",
+  "noo", "gracias", "menu", "menú", "combos", "pizzas", "bebidas", "cancelar",
+  "salir", "stop", "fin", "ya", "listo", "perfecto", "genial", "claro", "bueno"
+]);
+function looksLikeAddressCandidate(text) {
+  const t = String(text || "").trim().toLowerCase();
+  if (t.length < 6) return false;
+  if (/^\d+$/.test(t)) return false;
+  if (NON_ADDRESS_SHORT_TOKENS.has(t)) return false;
+  const hasNumber = /\d/.test(t);
+  const hasStreetWord =
+    /(calle|av\.?|avenida|pasaje|pasillo|ruta|n[º°]|piso|depto|dpto|barrio|villa|manzana|km|esquina|frente|cerca|al lado|entre)/i.test(
+      t
+    );
+  const hasStreetLikeName = /\b[a-z]{4,}\s+\d{1,5}\b/i.test(t);
+  return hasNumber || hasStreetWord || hasStreetLikeName;
+}
+
+/**
+ * Decide si conviene llamar a `detectAddressIntent` (call IA) considerando el
+ * estado de la sesion del cliente. Reduce ~80% las llamadas al detector.
+ */
+function shouldRunAddressDetection(session, text) {
+  // Pickup en local: jamas necesitamos detectar direccion.
+  if (session?.fulfillmentType === "local") return false;
+  // Si la sesion ya tiene una direccion confirmada, no la sobreescribas en cada mensaje.
+  if (session?.deliveryAddress && String(session.deliveryAddress).trim().length >= 8) {
+    return false;
+  }
+  // Si el flujo es delivery sin direccion: vale la pena solo si parece direccion.
+  if (session?.fulfillmentType === "delivery") {
+    return looksLikeAddressCandidate(text);
+  }
+  // Sin estado claro: solo si el mensaje pasa la heuristica.
+  return looksLikeAddressCandidate(text);
 }
 
 function extractAudioDurationSeconds(message) {
@@ -342,6 +531,19 @@ function sessionIsEmpty(session) {
   return true;
 }
 
+/** `created_at` de la fila en interactions (ISO). Sirve para TTL al rehidratar. */
+function parseInteractionCreatedAtMs(turn) {
+  const raw = turn?.created_at;
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Rehidrata checkout desde DB solo si el ultimo guardado con estado activo
+ * no supera CHECKOUT_SESSION_TTL_MS. Asi un pedido colgado del dia anterior
+ * no reaparece al reiniciar el proceso ni al volver a escribir horas despues.
+ */
 function rehydrateSessionFromHistory(session, recentHistory) {
   if (!sessionIsEmpty(session)) return session;
   if (!Array.isArray(recentHistory) || !recentHistory.length) return session;
@@ -356,6 +558,14 @@ function rehydrateSessionFromHistory(session, recentHistory) {
       return session;
     }
 
+    // Si en este turno el cliente canceló el pedido, no rehidratamos desde
+    // turnos anteriores: la sesion arranca limpia. Sin esto, la rehidratacion
+    // saltea el turno de cancelacion (status=browsing) y resucita el carrito
+    // viejo del turno previo (awaiting_add_more con los items).
+    if (meta.checkoutCancelled === true) {
+      return session;
+    }
+
     if (!CHECKOUT_STATUSES.includes(meta.status)) continue;
 
     const totalAmount = Number(meta.totalAmount || 0);
@@ -364,13 +574,21 @@ function rehydrateSessionFromHistory(session, recentHistory) {
 
     if (!totalAmount && !items.length) continue;
 
+    const createdMs = parseInteractionCreatedAtMs(turn);
+    if (createdMs == null) {
+      continue;
+    }
+    if (Date.now() - createdMs > CHECKOUT_SESSION_TTL_MS) {
+      return session;
+    }
+
     session.status = meta.status;
     session.totalAmount = totalAmount;
     session.details = details || items.join(", ");
     session.items = items.length ? items : details ? [details] : [];
     session.fulfillmentType = meta.fulfillmentType || session.fulfillmentType || "";
     session.deliveryAddress = meta.deliveryAddress || session.deliveryAddress || "";
-    session.lastActivityAt = Date.now();
+    session.lastActivityAt = createdMs;
     return session;
   }
 
@@ -388,7 +606,13 @@ function botReplyIndicatesOrderHandedToRestaurant(botResponse) {
   if (t.includes("costo de envio") || t.includes("costo de envío")) return true;
   if (t.includes("confirma el local")) return true;
   if (t.includes("mercado pago") && t.includes("usa este link")) return true;
-  if (t.includes("mercado pago") && t.includes("link")) return true;
+  /** Solo si ya hay URL real; "te envío el link" (instrucción previa) no debe disparar esto. */
+  if (
+    (t.includes("http://") || t.includes("https://")) &&
+    (t.includes("mercadopago") || t.includes("mercado pago") || t.includes("mercadolibre"))
+  ) {
+    return true;
+  }
   if (t.includes("init_point")) return true;
   return false;
 }
@@ -452,11 +676,194 @@ function formatTotal(totalAmount) {
   }).format(Number(totalAmount) || 0);
 }
 
+/** Notas del pedido: detalle agrupado (ej. mariolis x6). Sin modalidad ni dirección (van en columnas propias). */
+function groupItemNamesForOrderNotes(names) {
+  const list = Array.isArray(names) ? names.map((x) => String(x || "").trim()).filter(Boolean) : [];
+  const counts = new Map();
+  const order = [];
+  for (const n of list) {
+    if (!counts.has(n)) {
+      counts.set(n, 0);
+      order.push(n);
+    }
+    counts.set(n, counts.get(n) + 1);
+  }
+  const parts = order.map((name) => {
+    const c = counts.get(name);
+    return c > 1 ? `${name} x${c}` : name;
+  });
+  return parts.join(", ");
+}
+
+function buildOrderNotesFromSession(session) {
+  const items = Array.isArray(session?.items) ? session.items : [];
+  const fromItems = groupItemNamesForOrderNotes(items);
+  if (fromItems) return `Detalle: ${fromItems}`;
+  const details = String(session?.details || "").trim();
+  if (details) {
+    const pieces = details.split(",").map((s) => s.trim()).filter(Boolean);
+    const grouped = groupItemNamesForOrderNotes(pieces);
+    return grouped ? `Detalle: ${grouped}` : "";
+  }
+  return "";
+}
+
 const DELIVERY_PENDING_FEE_MESSAGE =
   "Gracias. Tu pedido quedó registrado con delivery a domicilio. " +
   "El costo de envío lo confirma el local en unos minutos. " +
   "En cuanto lo tengamos te enviamos el total en pesos argentinos (ARS) y los datos para pagar o el link de Mercado Pago. " +
   "Si no recibís nada en un rato, escribinos de nuevo por acá.";
+
+/**
+ * Tras enviar ticket con envío + efectivo: el cliente debe confirmar el total antes de dar por cerrado el pedido.
+ * `accept` | `reject` | `unknown`
+ */
+function detectDeliveryTotalConfirmationIntent(rawText) {
+  const trimmed = String(rawText || "").trim();
+  if (!trimmed) return "unknown";
+  const lower = trimmed.toLowerCase();
+
+  if (/\bno\s+me\s+parece\s+caro\b/i.test(lower) || /\bno\s+est[aá]\s+car[oa]\b/i.test(lower)) {
+    return "accept";
+  }
+  if (/\bme\s+parece\s+(un\s+poco\s+)?car[oa]\b/i.test(lower)) return "reject";
+  if (/\b(muy|demasiado|re)\s+car[oa]\b/i.test(lower)) return "reject";
+  if (/\b(poco|bastante)\s+car[oa]\b/i.test(lower)) return "reject";
+  if (/^no(\s+gracias)?$/i.test(trimmed)) return "reject";
+  if (/^no\b/i.test(trimmed) && trimmed.length < 52) return "reject";
+  if (/\bno\s+quiero\b/i.test(lower)) return "reject";
+  if (/\bcancel(ar|o|á)\b/i.test(lower)) return "reject";
+
+  if (/^(1|sí|si|dale|ok|okey|confirmo|confirmar|adelante|genial|perfecto|listo|va)\b/i.test(trimmed))
+    return "accept";
+  if (/^2\s*[!?.¡¿]*$/i.test(trimmed)) return "reject";
+  if (/\b(está|esta)\s+bien\b/i.test(lower)) return "accept";
+  if (/\bde\s+acuerdo\b/i.test(lower)) return "accept";
+  if (/\bsí\s*,?\s*quiero\b/i.test(lower) || /\bsi\s*,?\s*quiero\b/i.test(lower)) return "accept";
+  if (/\bconfirm(o|amos)?\s+(el\s+)?pedido\b/i.test(lower)) return "accept";
+
+  return "unknown";
+}
+
+function buildNotesWithCustomerTotalConfirm(baseNotes) {
+  const b = String(baseNotes || "").trim();
+  const tag = "Cliente confirmó el total con envío (WhatsApp).";
+  if (b.includes(tag)) return b;
+  return b ? `${b} | ${tag}` : tag;
+}
+
+async function handleCustomerDeliveryTotalConfirmation({
+  trimmedText,
+  order,
+  tenant,
+  customerNumber,
+  botNumber
+}) {
+  const intent = detectDeliveryTotalConfirmationIntent(trimmedText);
+  if (intent === "unknown") {
+    const ask =
+      "Necesito una respuesta clara para seguir.\n" +
+      "¿Confirmás el pedido con el total que te envié (incluye envío)?\n" +
+      "Respondé *SÍ* para confirmar o *NO* para cancelar el pedido.";
+    await saveInteraction({
+      restaurantId: tenant.id,
+      customerNumber,
+      botNumber,
+      messageType: "text",
+      userMessage: trimmedText,
+      botResponse: ask,
+      metadata: {
+        orderId: order.id,
+        awaitingDeliveryTotalClarify: true
+      }
+    });
+    return ask;
+  }
+
+  if (intent === "reject") {
+    const updated = await updateOrderMatching(
+      order.id,
+      {
+        status: "cancelled",
+        payment_status: "cancelled",
+        cancelled_at: new Date().toISOString()
+      },
+      { expectStatus: "awaiting_delivery_total_confirm" }
+    );
+    if (!updated) {
+      const gone =
+        "Ese pedido ya no está pendiente de confirmación. Si necesitás ayuda, escribí *menú* o lo que quieras pedir.";
+      await saveInteraction({
+        restaurantId: tenant.id,
+        customerNumber,
+        botNumber,
+        messageType: "text",
+        userMessage: trimmedText,
+        botResponse: gone,
+        metadata: { orderId: order.id, orderAlreadyClosed: true }
+      });
+      return gone;
+    }
+    const cancelReply =
+      "Listo, *cancelamos el pedido*. Si más adelante querés volver a pedir, escribinos cuando quieras.";
+    await saveInteraction({
+      restaurantId: tenant.id,
+      customerNumber,
+      botNumber,
+      messageType: "text",
+      userMessage: trimmedText,
+      botResponse: cancelReply,
+      metadata: {
+        orderId: order.id,
+        customerRejectedDeliveryTotal: true,
+        summaryForRestaurant: "El cliente no aceptó el total del pedido con delivery; pedido cancelado."
+      }
+    });
+    return cancelReply;
+  }
+
+  const newNotes = buildNotesWithCustomerTotalConfirm(order.notes);
+  const updated = await updateOrderMatching(
+    order.id,
+    {
+      status: "pending",
+      payment_status: "pending",
+      notes: newNotes
+    },
+    { expectStatus: "awaiting_delivery_total_confirm" }
+  );
+  if (!updated) {
+    const gone =
+      "Ese pedido ya fue confirmado o actualizado. Si tenés dudas, contactá al local o escribí *menú* para un pedido nuevo.";
+    await saveInteraction({
+      restaurantId: tenant.id,
+      customerNumber,
+      botNumber,
+      messageType: "text",
+      userMessage: trimmedText,
+      botResponse: gone,
+      metadata: { orderId: order.id, orderAlreadyClosed: true }
+    });
+    return gone;
+  }
+  const acceptReply =
+    "Perfecto. *Confirmamos tu pedido* con pago en *efectivo* al recibir. " +
+    "El local recibió tu confirmación y sigue con el pedido. ¡Gracias!";
+  await saveInteraction({
+    restaurantId: tenant.id,
+    customerNumber,
+    botNumber,
+    messageType: "text",
+    userMessage: trimmedText,
+    botResponse: acceptReply,
+    metadata: {
+      orderId: order.id,
+      customerAcceptedDeliveryTotal: true,
+      summaryForRestaurant: "El cliente acepta el precio del pedido con delivery (efectivo al recibir)."
+    }
+  });
+  return acceptReply;
+}
 
 /**
  * Recalcula el total a partir de los items en la sesion y el menu vigente.
@@ -510,13 +917,19 @@ function ensureSessionTotals(session, menuItems = []) {
 function buildFulfillmentQuestion(totalAmount) {
   return `¡Recibido! El total de tu pedido es ${formatTotal(
     totalAmount
-  )}. ¿Cómo preferís recibirlo?\n1. Delivery\n2. Comer en el local`;
+  )}. ¿Cómo querés el pedido?\n1. Delivery (envío a domicilio)\n2. Retiro en el local (pasás a buscarlo)`;
 }
 
-function buildPaymentQuestion(details, totalAmount) {
-  return `¡Recibido! El total por ${details} es ${formatTotal(
-    totalAmount
-  )}. ¿Cómo preferís pagar?\n1. Efectivo al recibir\n2. Mercado Pago`;
+function buildPaymentQuestion(details, totalAmount, fulfillmentType) {
+  const head = `¡Recibido! El total por ${details} es ${formatTotal(totalAmount)}.`;
+  if (fulfillmentType === "local") {
+    return (
+      `${head}\n\n` +
+      `Para *retiro en el local* el pago es *solo por Mercado Pago* (confirmamos el pedido antes de que vengas a buscarlo).\n` +
+      `Respondé *1* o *2* o escribí *mercado pago* y te envío el link.`
+    );
+  }
+  return `${head} ¿Cómo preferís pagar?\n1. Efectivo al recibir\n2. Mercado Pago`;
 }
 
 function buildAddMoreQuestion(details, totalAmount) {
@@ -784,19 +1197,47 @@ function detectDirectMenuOrder(text, menuItems = []) {
       (a, b) => normalizeForItemMatch(b.name).length - normalizeForItemMatch(a.name).length
     );
 
-  const foundItems = [];
+  const normByItem = new Map();
+  const normStrings = [];
   for (const item of sortedMenu) {
-    const normalizedName = normalizeForItemMatch(item.name);
-    // Permite repetidos: "dos sopas de mani" o "sopa de mani y sopa de mani".
-    let idx = working.indexOf(normalizedName);
+    const norm = normalizeForItemMatch(item.name);
+    normByItem.set(item, norm);
+    normStrings.push(norm);
+  }
+
+  const firstTokens = normStrings.map((n) => (n.split(/\s+/).filter(Boolean)[0] || "").trim());
+  function firstTokenIsUniqueInMenu(token) {
+    if (!token || token.length < 4) return false;
+    return firstTokens.filter((t) => t === token).length === 1;
+  }
+
+  /**
+   * Ademas del nombre completo, si la primera palabra del producto es unica en el menu
+   * (ej. solo un item empieza con "conito"), permitimos pedidos abreviados: "3 conitos"
+   * sin repetir "conito de papas y pancho" caractero por caracter.
+   */
+  const patternEntries = [];
+  for (const item of sortedMenu) {
+    const norm = normByItem.get(item);
+    patternEntries.push({ item, pattern: norm });
+    const fw = norm.split(/\s+/).filter(Boolean)[0] || "";
+    if (fw.length >= 4 && fw !== norm && firstTokenIsUniqueInMenu(fw)) {
+      patternEntries.push({ item, pattern: fw });
+    }
+  }
+  patternEntries.sort((a, b) => b.pattern.length - a.pattern.length);
+
+  const foundItems = [];
+  for (const { item, pattern } of patternEntries) {
+    let idx = working.indexOf(pattern);
     while (idx !== -1) {
       const qty = extractQuantityBeforePosition(working, idx);
       for (let i = 0; i < qty; i += 1) {
         foundItems.push(item);
       }
       working =
-        working.slice(0, idx) + " ".repeat(normalizedName.length) + working.slice(idx + normalizedName.length);
-      idx = working.indexOf(normalizedName);
+        working.slice(0, idx) + " ".repeat(pattern.length) + working.slice(idx + pattern.length);
+      idx = working.indexOf(pattern);
     }
   }
 
@@ -883,6 +1324,22 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
   // Lo guardamos en la orden para responder despues sin adivinar el sufijo.
   const customerChatId = (message?.from || "").trim() || null;
   const conversationKey = getConversationKey(tenant.id, customerNumber, botNumber);
+
+  const pendingTotalConfirmOrder = await getOrderAwaitingCustomerTotalConfirm({
+    restaurantId: tenant.id,
+    customerNumber,
+    botNumber
+  });
+  if (pendingTotalConfirmOrder) {
+    return handleCustomerDeliveryTotalConfirmation({
+      trimmedText,
+      order: pendingTotalConfirmOrder,
+      tenant,
+      customerNumber,
+      botNumber
+    });
+  }
+
   const menuItems = restaurantContext?.menuItems || [];
   let session = getOrCreateSession(conversationKey);
   rehydrateSessionFromHistory(session, recentHistory);
@@ -906,10 +1363,16 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
   let updatedMessages = [...previousMessages, text].slice(-20);
   conversationState.set(conversationKey, updatedMessages);
   session = getOrCreateSession(conversationKey);
-  const addressCheck = await detectAddressIntent({
-    customerMessage: text,
-    chatHistory: recentHistory
-  });
+  // Guard: solo llamamos al detector IA cuando el contexto lo justifica.
+  // Cubre los casos comunes (saludo, opcion numerica, retiro en local, direccion ya
+  // confirmada) sin gastar tokens. Reduce ~80% las llamadas a OpenAI.
+  let addressCheck = { isAddress: false, normalizedAddress: "" };
+  if (shouldRunAddressDetection(session, text)) {
+    addressCheck = await detectAddressIntent({
+      customerMessage: text,
+      chatHistory: recentHistory
+    });
+  }
   const hasConfirmedAddress = isConfirmedAddress(addressCheck, text);
   const fulfillmentIntent = detectFulfillmentIntent(trimmedText);
   const option = numericOption(trimmedText);
@@ -1155,7 +1618,8 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       session.status = "awaiting_payment";
       const paymentQuestion = buildPaymentQuestion(
         formatOrderDetailsForDisplay(session.items, session.details),
-        session.totalAmount
+        session.totalAmount,
+        session.fulfillmentType || "delivery"
       );
       await saveInteraction({
         restaurantId: tenant.id,
@@ -1175,7 +1639,8 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       session.status = "awaiting_payment";
       const paymentQuestion = buildPaymentQuestion(
         formatOrderDetailsForDisplay(session.items, session.details),
-        session.totalAmount
+        session.totalAmount,
+        "local"
       );
       await saveInteraction({
         restaurantId: tenant.id,
@@ -1204,7 +1669,8 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       return addMoreReply;
     }
 
-    const invalidFulfillmentReply = "No entendi tu opcion. Responde 1 para Delivery o 2 para Comer en el local.";
+    const invalidFulfillmentReply =
+      "No entendi tu opcion. Responde *1* para Delivery o *2* para retiro en el local (pasás a buscarlo).";
     await saveInteraction({
       restaurantId: tenant.id,
       customerNumber,
@@ -1219,13 +1685,13 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
 
   if (session.status === "awaiting_payment") {
     const isLocal = session.fulfillmentType === "local";
-    const orderNotesBase = `Detalle: ${session.details} | Modalidad: ${
-      session.fulfillmentType === "local" ? "comer_en_local" : "delivery"
-    }${session.deliveryAddress ? ` | Direccion: ${session.deliveryAddress}` : ""}`;
+    const orderNotesBase = buildOrderNotesFromSession(session);
+    const customerPhone = await resolveCustomerPhone(message, client);
     const baseOrderPayload = {
       restaurantId: tenant.id,
       customerNumber,
       customerChatId,
+      customerPhone,
       botNumber,
       items: session.items?.length ? session.items : [session.details],
       notes: orderNotesBase,
@@ -1234,74 +1700,51 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       totalAmount: session.totalAmount
     };
 
-    if (option === 1 || hasAnyPhrase(text, INTENT_PHRASES.cash)) {
-      if (!isLocal) {
-        const order = await saveOrder({
-          ...baseOrderPayload,
-          status: "awaiting_delivery_fee",
-          paymentMethod: "efectivo",
-          paymentStatus: "pending",
-          fulfillmentType: "delivery",
-          subtotalAmount: session.totalAmount,
-          deliveryFee: null,
-          finalTotalAmount: null,
-          paymentLink: null,
-          customerNotifiedAt: null
-        });
+    const mpIntent =
+      option === 2 ||
+      hasAnyPhrase(text, INTENT_PHRASES.mercadoPago) ||
+      (isLocal && option === 1);
+    const cashOnlyPhrase =
+      isLocal &&
+      hasAnyPhrase(text, INTENT_PHRASES.cash) &&
+      !hasAnyPhrase(text, INTENT_PHRASES.mercadoPago) &&
+      option !== 1 &&
+      option !== 2;
 
-        await saveInteraction({
-          restaurantId: tenant.id,
-          customerNumber,
-          botNumber,
-          messageType: "text",
-          userMessage: text,
-          botResponse: DELIVERY_PENDING_FEE_MESSAGE,
-          metadata: {
-            orderId: order.id,
-            paymentChoice: "cash",
-            fulfillmentType: "delivery",
-            details: session.details,
-            deliveryAwaitingFee: true
-          }
-        });
-
-        resetCheckoutSession(conversationKey);
-        conversationState.delete(conversationKey);
-        return DELIVERY_PENDING_FEE_MESSAGE;
-      }
-
-      const order = await saveOrder({
-        ...baseOrderPayload,
-        status: "pending",
-        paymentMethod: "efectivo",
-        paymentStatus: "pending"
-      });
-
-      const cashReply = "Perfecto, pago en efectivo al recibir. Tu pedido quedo registrado y en preparacion.";
-
+    if (cashOnlyPhrase) {
+      const pickupCashReply =
+        "Para *retiro en el local* el pago es *solo por Mercado Pago*: así confirmamos el pedido antes de que pases a buscarlo.\n" +
+        "Respondé *1*, *2* o escribí *mercado pago* y te mando el link.";
       await saveInteraction({
         restaurantId: tenant.id,
         customerNumber,
         botNumber,
         messageType: "text",
         userMessage: text,
-        botResponse: cashReply,
-        metadata: {
-          orderId: order.id,
-          paymentChoice: "cash",
-          fulfillmentType: session.fulfillmentType || "delivery",
-          details: session.details
-        }
+        botResponse: pickupCashReply,
+        metadata: { ...sessionMetadata(session), paymentChoice: "pickup_cash_rejected" }
       });
-
-      resetCheckoutSession(conversationKey);
-      conversationState.delete(conversationKey);
-      return cashReply;
+      return pickupCashReply;
     }
 
-    if (option === 2 || hasAnyPhrase(text, INTENT_PHRASES.mercadoPago)) {
+    if (isLocal) {
+      if (!mpIntent) {
+        const invalidLocalPay =
+          "Para retiro en el local respondé *1*, *2* o escribí *mercado pago* para recibir el link de pago.";
+        await saveInteraction({
+          restaurantId: tenant.id,
+          customerNumber,
+          botNumber,
+          messageType: "text",
+          userMessage: text,
+          botResponse: invalidLocalPay,
+          metadata: { ...sessionMetadata(session), paymentChoice: "invalid", fulfillmentPickup: true }
+        });
+        return invalidLocalPay;
+      }
       if (!session.totalAmount || session.totalAmount <= 0) {
-        const missingTotalReply = "No pude calcular el total del pedido. Revisa los productos y volve a cerrar el pedido.";
+        const missingTotalReply =
+          "No pude calcular el total del pedido. Revisá los productos y volvé a cerrar el pedido.";
         await saveInteraction({
           restaurantId: tenant.id,
           customerNumber,
@@ -1313,47 +1756,12 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
         });
         return missingTotalReply;
       }
-
-      if (!isLocal) {
-        const order = await saveOrder({
-          ...baseOrderPayload,
-          status: "awaiting_delivery_fee",
-          paymentMethod: "mercadopago",
-          paymentStatus: "pending",
-          fulfillmentType: "delivery",
-          subtotalAmount: session.totalAmount,
-          deliveryFee: null,
-          finalTotalAmount: null,
-          paymentLink: null,
-          customerNotifiedAt: null
-        });
-
-        await saveInteraction({
-          restaurantId: tenant.id,
-          customerNumber,
-          botNumber,
-          messageType: "text",
-          userMessage: text,
-          botResponse: DELIVERY_PENDING_FEE_MESSAGE,
-          metadata: {
-            orderId: order.id,
-            paymentChoice: "mercadopago",
-            fulfillmentType: "delivery",
-            details: session.details,
-            deliveryAwaitingFee: true
-          }
-        });
-
-        resetCheckoutSession(conversationKey);
-        conversationState.delete(conversationKey);
-        return DELIVERY_PENDING_FEE_MESSAGE;
-      }
-
       const order = await saveOrder({
         ...baseOrderPayload,
         status: "pending",
         paymentMethod: "mercadopago",
-        paymentStatus: "pending"
+        paymentStatus: "pending",
+        fulfillmentType: "local"
       });
 
       let paymentUrl;
@@ -1371,13 +1779,32 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
           botNumber,
           messageType: "text",
           userMessage: text,
-          botResponse: `${mpErrorReply} Si queres, responde 1 para pagar en efectivo al recibir.`,
-          metadata: { orderId: order.id, paymentChoice: "mercadopago_error", error: String(mpError.message || mpError) }
+          botResponse: `${mpErrorReply} Para retiro en el local el pago tiene que ser por Mercado Pago. Probá de nuevo en un rato o escribí al restaurante.`,
+          metadata: {
+            orderId: order.id,
+            paymentChoice: "mercadopago_error",
+            fulfillmentType: "local",
+            error: String(mpError.message || mpError)
+          }
         });
-        return `${mpErrorReply}\nSi queres, responde 1 para pagar en efectivo al recibir.`;
+        return `${mpErrorReply}\nPara retiro en el local el pago es solo por Mercado Pago. Probá de nuevo en un rato o contactá al local.`;
       }
 
-      const mpReply = `Perfecto. Para completar tu pago con Mercado Pago usa este link:\n${paymentUrl}`;
+      await updateOrderMatching(
+        order.id,
+        {
+          payment_link: paymentUrl,
+          customer_notified_at: new Date().toISOString()
+        },
+        { expectStatus: "pending", expectPaymentPendingOrNull: true }
+      );
+
+      const mpReply = [
+        "Perfecto. Para pagar con *Mercado Pago* usá este link:",
+        paymentUrl,
+        "",
+        "Cuando se acredite el pago, el restaurante prepara tu pedido. *Te avisamos por acá cuando esté listo para retirar.*"
+      ].join("\n");
 
       await saveInteraction({
         restaurantId: tenant.id,
@@ -1389,7 +1816,7 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
         metadata: {
           orderId: order.id,
           paymentChoice: "mercadopago",
-          fulfillmentType: session.fulfillmentType || "delivery",
+          fulfillmentType: "local",
           details: session.details
         }
       });
@@ -1397,6 +1824,90 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       resetCheckoutSession(conversationKey);
       conversationState.delete(conversationKey);
       return mpReply;
+    }
+
+    if (option === 1 || hasAnyPhrase(text, INTENT_PHRASES.cash)) {
+      const order = await saveOrder({
+        ...baseOrderPayload,
+        status: "awaiting_delivery_fee",
+        paymentMethod: "efectivo",
+        paymentStatus: "pending",
+        fulfillmentType: "delivery",
+        subtotalAmount: session.totalAmount,
+        deliveryFee: null,
+        finalTotalAmount: null,
+        paymentLink: null,
+        customerNotifiedAt: null
+      });
+
+      await saveInteraction({
+        restaurantId: tenant.id,
+        customerNumber,
+        botNumber,
+        messageType: "text",
+        userMessage: text,
+        botResponse: DELIVERY_PENDING_FEE_MESSAGE,
+        metadata: {
+          orderId: order.id,
+          paymentChoice: "cash",
+          fulfillmentType: "delivery",
+          details: session.details,
+          deliveryAwaitingFee: true
+        }
+      });
+
+      resetCheckoutSession(conversationKey);
+      conversationState.delete(conversationKey);
+      return DELIVERY_PENDING_FEE_MESSAGE;
+    }
+
+    if (option === 2 || hasAnyPhrase(text, INTENT_PHRASES.mercadoPago)) {
+      if (!session.totalAmount || session.totalAmount <= 0) {
+        const missingTotalReply = "No pude calcular el total del pedido. Revisa los productos y volve a cerrar el pedido.";
+        await saveInteraction({
+          restaurantId: tenant.id,
+          customerNumber,
+          botNumber,
+          messageType: "text",
+          userMessage: text,
+          botResponse: missingTotalReply,
+          metadata: { paymentChoice: "mercadopago_missing_total" }
+        });
+        return missingTotalReply;
+      }
+
+      const order = await saveOrder({
+        ...baseOrderPayload,
+        status: "awaiting_delivery_fee",
+        paymentMethod: "mercadopago",
+        paymentStatus: "pending",
+        fulfillmentType: "delivery",
+        subtotalAmount: session.totalAmount,
+        deliveryFee: null,
+        finalTotalAmount: null,
+        paymentLink: null,
+        customerNotifiedAt: null
+      });
+
+      await saveInteraction({
+        restaurantId: tenant.id,
+        customerNumber,
+        botNumber,
+        messageType: "text",
+        userMessage: text,
+        botResponse: DELIVERY_PENDING_FEE_MESSAGE,
+        metadata: {
+          orderId: order.id,
+          paymentChoice: "mercadopago",
+          fulfillmentType: "delivery",
+          details: session.details,
+          deliveryAwaitingFee: true
+        }
+      });
+
+      resetCheckoutSession(conversationKey);
+      conversationState.delete(conversationKey);
+      return DELIVERY_PENDING_FEE_MESSAGE;
     }
 
     const invalidOptionReply = "No entendi tu opcion. Responde 1 para Efectivo o 2 para Mercado Pago.";
@@ -1420,7 +1931,8 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
 
       const paymentQuestion = buildPaymentQuestion(
         formatOrderDetailsForDisplay(session.items, session.details),
-        session.totalAmount
+        session.totalAmount,
+        session.fulfillmentType || "delivery"
       );
       await saveInteraction({
         restaurantId: tenant.id,
@@ -1456,7 +1968,8 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       session.status = "awaiting_payment";
       const paymentQuestion = buildPaymentQuestion(
         formatOrderDetailsForDisplay(session.items, session.details),
-        session.totalAmount
+        session.totalAmount,
+        "delivery"
       );
       await saveInteraction({
         restaurantId: tenant.id,
@@ -1492,7 +2005,8 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       session.status = "awaiting_payment";
       const paymentQuestion = buildPaymentQuestion(
         formatOrderDetailsForDisplay(session.items, session.details),
-        session.totalAmount
+        session.totalAmount,
+        "local"
       );
       await saveInteraction({
         restaurantId: tenant.id,
@@ -1559,7 +2073,8 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
     if (!quote.hasOrder || !quote.totalAmount || quote.totalAmount <= 0) {
       if (session.items?.length && session.totalAmount > 0) {
         session.status = "awaiting_fulfillment";
-        const keepSessionReply = "Ya tengo tu pedido cargado. Responde 1 para Delivery o 2 para Comer en el local.";
+        const keepSessionReply =
+          "Ya tengo tu pedido cargado. Responde *1* para Delivery o *2* para retiro en el local (pasás a buscarlo).";
         await saveInteraction({
           restaurantId: tenant.id,
           customerNumber,
@@ -1654,6 +2169,11 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       recoveredStatus = "awaiting_fulfillment";
     } else if (lastBot.includes("cómo preferís pagar") || lastBot.includes("como preferis pagar")) {
       recoveredStatus = "awaiting_payment";
+    } else if (
+      lastBot.includes("retiro en el local") &&
+      (lastBot.includes("mercado pago") || lastBot.includes("mercadopago"))
+    ) {
+      recoveredStatus = "awaiting_payment";
     }
 
     if (recoveredStatus && !botReplyIndicatesOrderHandedToRestaurant(lastBot)) {
@@ -1694,6 +2214,22 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
     return helpReply;
   }
 
+  // Saludo puro ("hola", "buenas", etc.): respuesta fija con la marca del
+  // restaurante activo. Evita gastar tokens en el caso mas comun.
+  if (isPureGreeting(text)) {
+    const greetingReply = buildGreetingReply(restaurantContext);
+    await saveInteraction({
+      restaurantId: tenant.id,
+      customerNumber,
+      botNumber,
+      messageType: "text",
+      userMessage: text,
+      botResponse: greetingReply,
+      metadata: { status: "browsing", quickReply: "greeting" }
+    });
+    return greetingReply;
+  }
+
   const answer = await generateAssistantResponse({
     customerMessage: text,
     restaurantContext,
@@ -1731,8 +2267,12 @@ client.on("qr", (qr) => {
 
 let stopDeliveryNotifier = null;
 let stopPaymentPoller = null;
+/** Referencia actual del cliente WA para el poller de MP (puede ser null hasta `ready`). */
+let whatsappClientForPoller = null;
+
 client.on("ready", () => {
   console.log("WhatsApp conectado y listo.");
+  whatsappClientForPoller = client;
   try {
     if (typeof stopDeliveryNotifier === "function") {
       stopDeliveryNotifier();
@@ -1740,15 +2280,7 @@ client.on("ready", () => {
   } catch (_) {
     // ignore
   }
-  try {
-    if (typeof stopPaymentPoller === "function") {
-      stopPaymentPoller();
-    }
-  } catch (_) {
-    // ignore
-  }
   stopDeliveryNotifier = startOrderDeliveryNotifier(client);
-  stopPaymentPoller = startPaymentStatusPoller(client);
 });
 
 client.on("authenticated", () => {
@@ -1864,7 +2396,10 @@ client.on("message", async (message) => {
 });
 
 ensureTempDir()
-  .then(() => client.initialize())
+  .then(() => {
+    stopPaymentPoller = startPaymentStatusPoller(() => whatsappClientForPoller);
+    return client.initialize();
+  })
   .catch((error) => {
     console.error("No se pudo inicializar el bot:", error);
     process.exit(1);

@@ -67,7 +67,7 @@ async function getRestaurantByIncomingNumber(toNumber) {
 async function getRestaurantContext(restaurantId) {
   const { data: restaurant, error: restaurantError } = await supabase
     .from(TABLES.restaurants)
-    .select("id, name, whatsapp_number, opening_hours, policies, metadata")
+    .select("id, name, public_name, whatsapp_number, opening_hours, address, delivery_zones, policies, metadata")
     .eq("id", restaurantId)
     .maybeSingle();
 
@@ -199,8 +199,24 @@ async function saveOrder(payload) {
   if (payload.customerChatId) {
     row.customer_chat_id = String(payload.customerChatId).trim() || null;
   }
+  // Telefono real resuelto via Contact (cuando el cliente usa @lid el
+  // customer_number queda como LID y no sirve para llamar/WhatsApp). Si no
+  // se pudo resolver, queda null y el dashboard cae al customer_number.
+  if (payload.customerPhone) {
+    row.customer_phone = sanitizeWhatsAppId(payload.customerPhone) || null;
+  }
 
-  const { data, error } = await supabase.from(TABLES.orders).insert(row).select("*").single();
+  let { data, error } = await supabase.from(TABLES.orders).insert(row).select("*").single();
+  // Si la migracion `customer_phone` todavia no se aplicó en la DB, Postgres
+  // tira "column ... does not exist". Reintentamos sin la columna para no
+  // bloquear los pedidos. El telefono se podrá guardar cuando se aplique el SQL.
+  if (error && /customer_phone/i.test(error.message || "") && "customer_phone" in row) {
+    const fallbackRow = { ...row };
+    delete fallbackRow.customer_phone;
+    const retry = await supabase.from(TABLES.orders).insert(fallbackRow).select("*").single();
+    data = retry.data;
+    error = retry.error;
+  }
   if (error) {
     throw new Error(`Error registrando pedido: ${error.message}`);
   }
@@ -232,6 +248,9 @@ async function updateOrderMatching(orderId, patch, constraints = {}) {
   if (constraints.expectStatus != null) {
     query = query.eq("status", constraints.expectStatus);
   }
+  if (constraints.expectPaymentPendingOrNull) {
+    query = query.or("payment_status.is.null,payment_status.eq.pending");
+  }
   if (constraints.requireCustomerNotifiedNull) {
     query = query.is("customer_notified_at", null);
   }
@@ -254,6 +273,32 @@ async function getRestaurantNameById(restaurantId) {
   return data?.name || "Restaurante";
 }
 
+/**
+ * Pedido delivery + efectivo esperando que el cliente confirme el total (ticket ya enviado).
+ */
+async function getOrderAwaitingCustomerTotalConfirm({ restaurantId, customerNumber, botNumber }) {
+  const botVariants = botNumberVariantsForQuery(botNumber);
+  if (!botVariants.length) return null;
+
+  let query = supabase
+    .from(TABLES.orders)
+    .select("*")
+    .eq("restaurant_id", restaurantId)
+    .eq("customer_number", sanitizeWhatsAppId(customerNumber))
+    .eq("status", "awaiting_delivery_total_confirm")
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  query =
+    botVariants.length > 1 ? query.in("bot_number", botVariants) : query.eq("bot_number", botVariants[0]);
+
+  const { data, error } = await query.maybeSingle();
+  if (error) {
+    throw new Error(`Error buscando pedido pendiente de confirmacion de total: ${error.message}`);
+  }
+  return data || null;
+}
+
 module.exports = {
   supabase,
   TABLES,
@@ -265,5 +310,6 @@ module.exports = {
   saveOrder,
   updateOrder,
   updateOrderMatching,
-  getRestaurantNameById
+  getRestaurantNameById,
+  getOrderAwaitingCustomerTotalConfirm
 };

@@ -50,11 +50,13 @@ function resolveSubtotalForTicket(orderRow, finalTotal, deliveryFee) {
   return 0;
 }
 
-function buildCashFinalMessage(ticketBlock) {
+/** Ticket + pedido de confirmación al cliente (delivery + efectivo). El pedido en DB pasa a awaiting_delivery_total_confirm. */
+function buildCashTotalProposalMessage(ticketBlock) {
   return (
     `${ticketBlock}\n\n` +
-    `Confirmamos pago en *efectivo* al recibir el pedido.\n` +
-    `¡Gracias por tu pedido!`
+    `Este es el *total* de tu pedido (incluye envío a domicilio).\n` +
+    `¿Confirmás el pedido con este total?\n` +
+    `Respondé *SÍ* para confirmar o *NO* si no querés continuar (se cancela el pedido).`
   );
 }
 
@@ -62,12 +64,15 @@ function buildMpFinalMessage(ticketBlock, url) {
   return `${ticketBlock}\n\nPara pagar con *Mercado Pago* usá este link:\n${url}`;
 }
 
-function buildMpFallbackToCashMessage(ticketBlock) {
+/** Mismo criterio que efectivo: el cliente debe confirmar el total antes de dar el pedido por cerrado. */
+function buildMpFallbackToCashProposalMessage(ticketBlock) {
   return (
     `${ticketBlock}\n\n` +
     `Hubo un problema al generar el link de Mercado Pago.\n` +
-    `Podés pagar en *efectivo* al recibir el pedido.\n` +
-    `Si preferís MP, avisá al local o escribinos de nuevo por acá y lo reintentamos.`
+    `Podés pagar en *efectivo* al recibir el pedido.\n\n` +
+    `Este es el *total* (incluye envío). ¿Lo confirmás?\n` +
+    `Respondé *SÍ* para confirmar o *NO* para cancelar el pedido.\n` +
+    `Si preferís MP, escribinos de nuevo por acá y lo reintentamos.`
   );
 }
 
@@ -209,7 +214,7 @@ async function processDeliveryFeeReadyOrder(orderRow, whatsappClient) {
         });
         console.log("[delivery-notify] Preferencia MP generada:", orderRow.id);
       } catch (mpErr) {
-        const fallback = buildMpFallbackToCashMessage(ticketBlock);
+        const fallback = buildMpFallbackToCashProposalMessage(ticketBlock);
         try {
           await sendWhatsAppMessageRobust(whatsappClient, sendParams, fallback);
         } catch (waErr) {
@@ -226,7 +231,8 @@ async function processDeliveryFeeReadyOrder(orderRow, whatsappClient) {
           orderRow.id,
           {
             customer_notified_at: new Date().toISOString(),
-            status: "pending",
+            status: "awaiting_delivery_total_confirm",
+            payment_method: "efectivo",
             payment_link: null,
             payment_status: "pending"
           },
@@ -245,6 +251,7 @@ async function processDeliveryFeeReadyOrder(orderRow, whatsappClient) {
             orderId: orderRow.id,
             deliveryNotify: true,
             mercadopagoFallback: true,
+            awaitingCustomerTotalConfirm: true,
             error: String(mpErr?.message || mpErr)
           }
         });
@@ -253,10 +260,25 @@ async function processDeliveryFeeReadyOrder(orderRow, whatsappClient) {
     }
 
     let body;
+    let patch;
+    let interactionNote = "[sistema] total delivery confirmado";
+
     if (wantsMp && paymentUrl) {
       body = buildMpFinalMessage(ticketBlock, paymentUrl);
+      patch = {
+        customer_notified_at: new Date().toISOString(),
+        status: "pending",
+        payment_status: "pending",
+        payment_link: paymentUrl
+      };
     } else {
-      body = buildCashFinalMessage(ticketBlock);
+      body = buildCashTotalProposalMessage(ticketBlock);
+      interactionNote = "[sistema] total delivery + pedido confirmación cliente";
+      patch = {
+        customer_notified_at: new Date().toISOString(),
+        status: "awaiting_delivery_total_confirm",
+        payment_status: "pending"
+      };
     }
 
     try {
@@ -270,15 +292,6 @@ async function processDeliveryFeeReadyOrder(orderRow, whatsappClient) {
         .eq("id", orderRow.id)
         .eq("status", "delivery_fee_set");
       return;
-    }
-
-    const patch = {
-      customer_notified_at: new Date().toISOString(),
-      status: "pending",
-      payment_status: "pending"
-    };
-    if (wantsMp && paymentUrl) {
-      patch.payment_link = paymentUrl;
     }
 
     const updated = await updateOrderMatching(orderRow.id, patch, {
@@ -295,12 +308,13 @@ async function processDeliveryFeeReadyOrder(orderRow, whatsappClient) {
       customerNumber: orderRow.customer_number,
       botNumber: orderRow.bot_number,
       messageType: "text",
-      userMessage: "[sistema] total delivery confirmado",
+      userMessage: interactionNote,
       botResponse: body,
       metadata: {
         orderId: orderRow.id,
         deliveryNotify: true,
-        paymentChoice: wantsMp ? "mercadopago" : "cash"
+        paymentChoice: wantsMp ? "mercadopago" : "cash",
+        awaitingCustomerTotalConfirm: patch.status === "awaiting_delivery_total_confirm"
       }
     });
   } finally {
@@ -394,6 +408,234 @@ async function processDeliveryDeniedOrder(orderRow, whatsappClient) {
   }
 }
 
+const pickupNotifyInflight = new Set();
+
+/** Mismo criterio amplio que el dashboard para “es delivery”. */
+function orderRowIsDelivery(orderRow) {
+  const ft = String(orderRow?.fulfillment_type || "").trim().toLowerCase();
+  if (ft === "delivery") return true;
+  const n = String(orderRow?.notes || "").toLowerCase();
+  return n.includes("modalidad: delivery") || n.includes("modalidad:delivery");
+}
+
+const deliveryEnRouteInflight = new Set();
+
+function buildDeliveryEnRouteCustomerBody(restaurantName, orderId) {
+  const brand = String(restaurantName || "").trim() || "el restaurante";
+  const shortId = orderId ? String(orderId).replace(/-/g, "").slice(0, 8) : "";
+  const ref = shortId ? ` · Pedido #${shortId}` : "";
+  return [
+    `*Tu pedido ya salió*${ref}`,
+    `El repartidor de *${brand}* va en camino a tu domicilio.`,
+    "Si no podés recibirlo, avisános respondiendo por este chat.",
+    "¡Gracias por tu pedido!"
+  ].join("\n");
+}
+
+/**
+ * El repartidor tomó el pedido (`delivery_claimed_at`); avisamos al cliente por WhatsApp una sola vez.
+ * Idempotente con `delivery_en_route_customer_notified_at`.
+ */
+async function processDeliveryEnRouteNotifyOrder(orderRow, whatsappClient) {
+  if (!orderRow?.id) return;
+  if (!orderRowIsDelivery(orderRow)) return;
+  if (!orderRow.delivery_claimed_at) return;
+  if (orderRow.delivery_en_route_customer_notified_at) return;
+  const st = String(orderRow.status || "").trim().toLowerCase();
+  if (st === "cancelled" || st === "delivered") return;
+
+  if (!whatsappClient) {
+    console.warn("[delivery-en-route] Sin WhatsApp, salto:", orderRow.id);
+    return;
+  }
+  if (deliveryEnRouteInflight.has(orderRow.id)) return;
+  deliveryEnRouteInflight.add(orderRow.id);
+
+  try {
+    const chatIdPreview =
+      orderRow.customer_chat_id || chatIdForCustomer(orderRow.customer_number);
+    if (!chatIdPreview) {
+      console.warn("[delivery-en-route] Sin chatId válido:", orderRow.id);
+      return;
+    }
+
+    const sendParams = {
+      customerChatId: orderRow.customer_chat_id || null,
+      customerNumber: orderRow.customer_number
+    };
+
+    const nameFromDb = await getRestaurantNameById(orderRow.restaurant_id);
+    const body = buildDeliveryEnRouteCustomerBody(nameFromDb, orderRow.id);
+
+    await sendWhatsAppMessageRobust(whatsappClient, sendParams, body);
+
+    const notifiedAt = new Date().toISOString();
+    const { data: updated, error } = await supabase
+      .from(TABLES.orders)
+      .update({ delivery_en_route_customer_notified_at: notifiedAt })
+      .eq("id", orderRow.id)
+      .not("delivery_claimed_at", "is", null)
+      .is("delivery_en_route_customer_notified_at", null)
+      .neq("status", "cancelled")
+      .neq("status", "delivered")
+      .select("*")
+      .maybeSingle();
+
+    if (error) {
+      console.error("[delivery-en-route] Error actualizando fila:", orderRow.id, error.message);
+      return;
+    }
+    if (!updated) {
+      console.log("[delivery-en-route] Sin match al marcar notificado (carrera):", orderRow.id);
+      return;
+    }
+
+    await saveInteraction({
+      restaurantId: updated.restaurant_id,
+      customerNumber: updated.customer_number,
+      botNumber: updated.bot_number,
+      messageType: "text",
+      userMessage: "[sistema] repartidor en camino (tomó el pedido)",
+      botResponse: body,
+      metadata: {
+        orderId: updated.id,
+        deliveryEnRouteCustomerNotified: true
+      }
+    });
+    console.log("[delivery-en-route] Cliente avisado, pedido:", orderRow.id);
+  } catch (err) {
+    console.error("[delivery-en-route] Fallo envío:", orderRow.id, err?.message || err);
+    // Sin columna de “falló”: el poller reintenta mientras siga sin notified_at
+  } finally {
+    deliveryEnRouteInflight.delete(orderRow.id);
+  }
+}
+
+async function scanDeliveryEnRoutePending(whatsappClient) {
+  const { data, error } = await supabase
+    .from(TABLES.orders)
+    .select("*")
+    .not("delivery_claimed_at", "is", null)
+    .is("delivery_en_route_customer_notified_at", null)
+    .neq("status", "cancelled")
+    .neq("status", "delivered")
+    .order("delivery_claimed_at", { ascending: true })
+    .limit(40);
+
+  if (error) {
+    console.error("[delivery-en-route] Error escaneando:", error.message);
+    return;
+  }
+  for (const row of data || []) {
+    try {
+      await processDeliveryEnRouteNotifyOrder(row, whatsappClient);
+    } catch (err) {
+      console.error("[delivery-en-route] Error procesando", row.id, err);
+    }
+  }
+}
+
+async function buildPickupReadyWhatsAppBody(orderRow) {
+  const name = (await getRestaurantNameById(orderRow.restaurant_id)) || "el restaurante";
+  const brand = String(name).trim() || "el local";
+  return [
+    "*Tu pedido está listo para retirar*",
+    `Ya podés pasar por *${brand}* a buscarlo.`,
+    "Si te piden referencia, mostrá este mensaje o decí el nombre con el que pediste.",
+    "¡Gracias!"
+  ].join("\n");
+}
+
+/**
+ * El dashboard setea `pickup_ready_notify_requested_at`; el bot envía WhatsApp y marca `pickup_ready_customer_notified_at`.
+ */
+async function processPickupReadyNotifyOrder(orderRow, whatsappClient) {
+  if (!orderRow?.id) return;
+  if (String(orderRow.fulfillment_type || "").toLowerCase() !== "local") return;
+  if (orderRow.status !== "confirmed") return;
+  if (!orderRow.pickup_ready_notify_requested_at) return;
+  if (orderRow.pickup_ready_customer_notified_at) return;
+  const ps = String(orderRow.payment_status || "").toLowerCase();
+  if (ps !== "approved" && ps !== "paid") return;
+  if (!whatsappClient) {
+    console.warn("[pickup-notify] Sin WhatsApp, salto:", orderRow.id);
+    return;
+  }
+  if (pickupNotifyInflight.has(orderRow.id)) return;
+  pickupNotifyInflight.add(orderRow.id);
+
+  try {
+    const body = await buildPickupReadyWhatsAppBody(orderRow);
+    const sendParams = {
+      customerChatId: orderRow.customer_chat_id || null,
+      customerNumber: orderRow.customer_number
+    };
+    await sendWhatsAppMessageRobust(whatsappClient, sendParams, body);
+
+    const notifiedAt = new Date().toISOString();
+    const { data: updated, error } = await supabase
+      .from(TABLES.orders)
+      .update({ pickup_ready_customer_notified_at: notifiedAt })
+      .eq("id", orderRow.id)
+      .eq("status", "confirmed")
+      .not("pickup_ready_notify_requested_at", "is", null)
+      .is("pickup_ready_customer_notified_at", null)
+      .select("*")
+      .maybeSingle();
+
+    if (error) {
+      console.error("[pickup-notify] Error actualizando fila:", orderRow.id, error.message);
+      return;
+    }
+    if (!updated) {
+      console.log("[pickup-notify] Sin match al marcar notificado (carrera):", orderRow.id);
+      return;
+    }
+
+    await saveInteraction({
+      restaurantId: updated.restaurant_id,
+      customerNumber: updated.customer_number,
+      botNumber: updated.bot_number,
+      messageType: "text",
+      userMessage: "[sistema] retiro listo (dashboard)",
+      botResponse: body,
+      metadata: {
+        orderId: updated.id,
+        pickupReadyNotified: true
+      }
+    });
+    console.log("[pickup-notify] Cliente avisado retiro listo:", orderRow.id);
+  } catch (err) {
+    console.error("[pickup-notify] Fallo envío:", orderRow.id, err?.message || err);
+  } finally {
+    pickupNotifyInflight.delete(orderRow.id);
+  }
+}
+
+async function scanPickupReadyNotifyPending(whatsappClient) {
+  const { data, error } = await supabase
+    .from(TABLES.orders)
+    .select("*")
+    .eq("fulfillment_type", "local")
+    .eq("status", "confirmed")
+    .not("pickup_ready_notify_requested_at", "is", null)
+    .is("pickup_ready_customer_notified_at", null)
+    .order("pickup_ready_notify_requested_at", { ascending: true })
+    .limit(25);
+
+  if (error) {
+    console.error("[pickup-notify] Error escaneando:", error.message);
+    return;
+  }
+  for (const row of data || []) {
+    try {
+      await processPickupReadyNotifyOrder(row, whatsappClient);
+    } catch (err) {
+      console.error("[pickup-notify] Error procesando", row.id, err);
+    }
+  }
+}
+
 /** Busca pedidos delivery_fee_set sin notificar y los procesa (poller / startup scan). */
 async function scanAndProcessPending(whatsappClient) {
   const { data, error } = await supabase
@@ -428,19 +670,19 @@ async function scanAndProcessPending(whatsappClient) {
 
   if (deniedErr) {
     console.error("[delivery-notify] Error escaneando denegaciones:", deniedErr.message);
-    return;
-  }
-
-  if (!deniedRows?.length) return;
-
-  console.log("[delivery-notify] Pendientes denegación encontrados:", deniedRows.length);
-  for (const row of deniedRows) {
-    try {
-      await processDeliveryDeniedOrder(row, whatsappClient);
-    } catch (err) {
-      console.error("[delivery-notify] Error denegación", row.id, err);
+  } else if (deniedRows?.length) {
+    console.log("[delivery-notify] Pendientes denegación encontrados:", deniedRows.length);
+    for (const row of deniedRows) {
+      try {
+        await processDeliveryDeniedOrder(row, whatsappClient);
+      } catch (err) {
+        console.error("[delivery-notify] Error denegación", row.id, err);
+      }
     }
   }
+
+  await scanPickupReadyNotifyPending(whatsappClient);
+  await scanDeliveryEnRoutePending(whatsappClient);
 }
 
 function startOrderDeliveryNotifier(whatsappClient) {
@@ -454,6 +696,8 @@ function startOrderDeliveryNotifier(whatsappClient) {
         try {
           await processDeliveryFeeReadyOrder(payload.new, whatsappClient);
           await processDeliveryDeniedOrder(payload.new, whatsappClient);
+          await processPickupReadyNotifyOrder(payload.new, whatsappClient);
+          await processDeliveryEnRouteNotifyOrder(payload.new, whatsappClient);
         } catch (err) {
           console.error("[delivery-notify]", err);
         }
@@ -487,5 +731,9 @@ module.exports = {
   startOrderDeliveryNotifier,
   processDeliveryFeeReadyOrder,
   processDeliveryDeniedOrder,
-  scanAndProcessPending
+  processPickupReadyNotifyOrder,
+  processDeliveryEnRouteNotifyOrder,
+  scanAndProcessPending,
+  scanPickupReadyNotifyPending,
+  scanDeliveryEnRoutePending
 };

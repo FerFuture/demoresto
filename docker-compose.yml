@@ -17,5 +17,6 @@ services:
       - "5173:5173"
     volumes:
       - ./dashboard:/app
+      # node_modules en volumen aparte: el entrypoint del dashboard ejecuta npm install al iniciar.
       - /app/node_modules
       - ./.env:/app/.env:ro

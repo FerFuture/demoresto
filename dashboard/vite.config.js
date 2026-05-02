@@ -32,6 +32,8 @@ export default defineConfig({
     "import.meta.env.VITE_SUPABASE_KEY": JSON.stringify(rootEnv.SUPABASE_KEY || ""),
     "import.meta.env.VITE_BOT_WHATSAPP_NUMBER": JSON.stringify(
       rootEnv.DASHBOARD_BOT_WHATSAPP_NUMBER || rootEnv.WWEBJS_BOT_NUMBER || ""
-    )
+    ),
+    "import.meta.env.VITE_ADMIN_PASSWORD": JSON.stringify(rootEnv.VITE_ADMIN_PASSWORD || ""),
+    "import.meta.env.VITE_DELIVERY_PASSWORD": JSON.stringify(rootEnv.VITE_DELIVERY_PASSWORD || "")
   }
 });
