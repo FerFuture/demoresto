@@ -967,17 +967,104 @@ function formatOrderDetailsForDisplay(items, fallbackDetails) {
     .join(", ");
 }
 
+/** Palabras que empiezan como "carta" pero no son pedido de menú (evita falsos positivos en fuzzy). */
+const MENU_FUZZY_BLOCKLIST = new Set([
+  "cartera",
+  "carteras",
+  "cartero",
+  "carters",
+  "cartel",
+  "carteles",
+  "carton",
+  "cartones",
+  "cartucho",
+  "cartuchos"
+]);
+
+/** Errores ortográficos y jerga habitual por los que el cliente pide ver menú/carta. */
+const MENU_REQUEST_TYPO_WHITELIST = new Set([
+  "cartola",
+  "cartaa",
+  "cartta",
+  "kartaa",
+  "karta",
+  "qarta",
+  "menuu",
+  "menuuu",
+  "meni",
+  "munu",
+  "catalogo",
+  "listin",
+  "listín",
+  "kmenu",
+  "qmenu",
+  "mcarta",
+  "lacarta",
+  "lamenu",
+  "lamenuu"
+]);
+
+function levenshteinDistance(a, b) {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i += 1) dp[i][0] = i;
+  for (let j = 0; j <= n; j += 1) dp[0][j] = j;
+  for (let i = 1; i <= m; i += 1) {
+    for (let j = 1; j <= n; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[m][n];
+}
+
+/**
+ * True si el texto pide ver menú/carta y debe responderse SIEMPRE con el listado en base (`buildMenuLinesForWhatsApp`),
+ * sin pasar por la IA. Incluye errores de tipeo y formas coloquiales cercanas a "menu"/"carta".
+ */
 function wantsMenuList(text) {
   const t = normalizeTextForMatch(text).replace(/\s+/g, " ").trim();
   if (!t) return false;
-  return (
+
+  if (
     t.includes("menu") ||
     t.includes("menú") ||
     t.includes("carta") ||
     t.includes("lista de productos") ||
+    t.includes("lista de precios") ||
     t.includes("que tienen") ||
-    t.includes("que hay")
-  );
+    t.includes("que hay") ||
+    /\b(cat[aá]logo|catalogo)\b/.test(t) ||
+    /\bopciones?\s+para\s+comer\b/.test(t) ||
+    /\bver\s+(los\s+)?precios\b/.test(t)
+  ) {
+    return true;
+  }
+
+  const compact = t.replace(/[^a-z0-9ñ]/g, "");
+  if (
+    compact.includes("menu") ||
+    compact.includes("menú") ||
+    compact.includes("carta") ||
+    compact.includes("catalogo")
+  ) {
+    return true;
+  }
+
+  const tokens = t.split(/[^a-z0-9ñ]+/).filter((w) => w.length >= 3);
+  for (const raw of tokens) {
+    const w = normalizeTextForMatch(raw);
+    if (MENU_REQUEST_TYPO_WHITELIST.has(w)) return true;
+    if (MENU_FUZZY_BLOCKLIST.has(w)) continue;
+    // Fuzzy solo con prefijo para no confundir con "mesa", "mensaje", etc.
+    if (w.startsWith("cart") && w.length <= 9 && levenshteinDistance(w, "carta") <= 2) return true;
+    if (w.startsWith("men") && w.length <= 6 && levenshteinDistance(w, "menu") <= 2) return true;
+  }
+
+  return false;
 }
 
 /** Normaliza categoria de DB y filtro (combos, pizza) para comparar. */

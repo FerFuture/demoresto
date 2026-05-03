@@ -19,6 +19,10 @@ import {
   playNotification
 } from "../lib/format";
 
+/**
+ * Ventana de carga de filas para cola / activos / realtime. Los entregados viejos no se listan en UI
+ * (solo se muestran los aún reversibles; ver partitioned.doneToday).
+ */
 const TODAY_HISTORY_HOURS = 18;
 /** Tras marcar entregado, solo este tiempo se puede deshacer desde delivery (alinear con política operativa). */
 const REVERT_DELIVERY_WINDOW_MS = 15 * 60 * 1000;
@@ -224,7 +228,11 @@ export default function DeliveryApp({ onLogout }) {
       const st = normalizeOrderStatus(order);
 
       if (st === "delivered") {
-        if (!userId || order.delivery_claimed_by_user_id === userId) {
+        // No listar historial de entregas: solo lo reciente mientras aplica "Revertir entrega".
+        if (
+          (!userId || order.delivery_claimed_by_user_id === userId) &&
+          canRevertDeliveredWithinWindow(order)
+        ) {
           doneToday.push(order);
         }
         continue;
@@ -710,25 +718,25 @@ export default function DeliveryApp({ onLogout }) {
           )}
         </section>
 
-        <section className="space-y-3">
-          <SectionHeader title="Entregados (últimas horas)" count={partitioned.doneToday.length} tone="done" />
-          {partitioned.doneToday.length === 0 ? (
-            <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4 text-xs text-slate-500">
-              Cuando confirmes entregas, aparecen acá.
-            </div>
-          ) : (
-            partitioned.doneToday.map((order) => (
+        {partitioned.doneToday.length > 0 ? (
+          <section className="space-y-3">
+            <SectionHeader
+              title="Entrega reciente (deshacer)"
+              count={partitioned.doneToday.length}
+              tone="done"
+            />
+            {partitioned.doneToday.map((order) => (
               <DeliveryOrderCard
                 key={order.id}
                 order={order}
                 compact
                 saving={savingOrderId === order.id}
-                canRevertDelivered={canRevertDeliveredWithinWindow(order)}
+                canRevertDelivered
                 onRevertDelivered={() => revertDelivered(order)}
               />
-            ))
-          )}
-        </section>
+            ))}
+          </section>
+        ) : null}
       </div>
       {confirmDialog ? (
         <ConfirmModal dialog={confirmDialog} onResolve={handleConfirmDialog} />
