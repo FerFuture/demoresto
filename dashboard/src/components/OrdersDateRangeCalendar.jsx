@@ -9,10 +9,6 @@ function parseLocalDateKey(key) {
   return isValid(d) ? d : undefined;
 }
 
-/**
- * Calendario de rango (desde / hasta) para filtros del listado de pedidos.
- * Valores: strings yyyy-mm-dd vacíos = sin filtro de fecha.
- */
 export default function OrdersDateRangeCalendar({ dateFrom, dateTo, onRangeChange }) {
   const [monthsShown, setMonthsShown] = useState(1);
 

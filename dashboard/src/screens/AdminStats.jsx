@@ -31,11 +31,6 @@ function shortDayLabel(date) {
   return d.toLocaleDateString("es-AR", { weekday: "short", day: "2-digit" });
 }
 
-/**
- * Considera un pedido como "venta efectivamente concretada" cuando ya fue
- * entregado o tiene el pago aprobado (cobrado por MP, o efectivo confirmado).
- * Nunca cuenta los cancelados.
- */
 function orderIsRevenue(order) {
   const st = normalizeOrderStatus(order);
   if (st === "cancelled") return false;
@@ -164,7 +159,6 @@ function computeStats(orders) {
   }
   today.avgTicket = today.delivered > 0 ? today.revenue / today.delivered : 0;
 
-  // Últimos 7 días (incluye hoy), ordenados de más viejo a más nuevo.
   const last7Days = [];
   for (let i = 6; i >= 0; i -= 1) {
     const d = new Date();
@@ -181,7 +175,6 @@ function computeStats(orders) {
     if (orderIsRevenue(order)) entry.revenue += effectiveOrderTotal(order);
   }
 
-  // Top productos en la ventana de los últimos N días (no cancelados).
   const itemCounts = new Map();
   for (const order of orders) {
     if (normalizeOrderStatus(order) === "cancelled") continue;
@@ -197,7 +190,6 @@ function computeStats(orders) {
     .sort((a, b) => b.count - a.count)
     .slice(0, 5);
 
-  // Desglose por método de pago entre pedidos cobrados (no cancelados).
   const paymentBreakdown = { cash: { count: 0, revenue: 0 }, mp: { count: 0, revenue: 0 }, other: { count: 0, revenue: 0 } };
   for (const order of orders) {
     if (!orderIsRevenue(order)) continue;

@@ -506,7 +506,9 @@ function getOrCreateSession(conversationKey) {
     fulfillmentType: "",
     deliveryAddress: "",
     conversationText: "",
-    lastActivityAt: Date.now()
+    lastActivityAt: Date.now(),
+    /** `{ type, mode, candidates, createdAt }` para confirmar pedido tras sugerencia fuzzy. */
+    pendingClarification: null
   };
   checkoutSessions.set(conversationKey, fresh);
   return fresh;
@@ -1177,9 +1179,8 @@ function findMentionedMenuItem(text, menuItems = []) {
 }
 
 function buildMenuLinesForWhatsApp(menuItems = [], tenant = null, options = {}) {
-  const brand =
-    (process.env.RESTAURANT_PUBLIC_NAME || "").trim() || tenant?.name || "Restaurante Palermo";
-  const bot = (process.env.BOT_DISPLAY_NAME || "RestoBot").trim();
+  const brand = resolvePublicBrandName({ restaurant: tenant || {} });
+  const bot = resolveBotDisplayName();
   const header = `*${bot} · ${brand}*\n\n`;
   const valid = (menuItems || []).filter((item) => Number(item?.price) > 0 && String(item?.name || "").trim());
   const sectionKey = (options.sectionKey || "").trim();
@@ -1368,6 +1369,299 @@ function detectDirectMenuOrder(text, menuItems = []) {
   };
 }
 
+/** Ratio máximo distancia/normalizado para sugerir un producto (nomás casos “casi iguales”). */
+const FUZZY_ORDER_MAX_RATIO = Number(process.env.FUZZY_ORDER_MAX_RATIO || 0.38);
+/** Si el 2.º candidato está casi igual de cerca que el 1.º, listamos opciones numeradas. */
+const FUZZY_ORDER_PICK_GAP = Number(process.env.FUZZY_ORDER_PICK_GAP || 0.07);
+const PENDING_CLARIFICATION_TTL_MS = Number(process.env.PENDING_CLARIFICATION_TTL_MS || 10 * 60 * 1000);
+
+function minLevenshteinRatio(a, b) {
+  const A = String(a || "").trim();
+  const B = String(b || "").trim();
+  if (!A || !B) return 1;
+  const d = levenshteinDistance(A, B);
+  return d / Math.max(A.length, B.length, 1);
+}
+
+function buildSlidingPhrasesForFuzzy(normalizedLine) {
+  const tokens = String(normalizedLine || "")
+    .split(/\s+/)
+    .filter(Boolean);
+  const out = new Set();
+  if (!tokens.length) return [];
+  const maxLen = Math.min(tokens.length, 14);
+  for (let len = maxLen; len >= 2; len -= 1) {
+    for (let i = 0; i + len <= tokens.length; i += 1) {
+      out.add(tokens.slice(i, i + len).join(" "));
+    }
+  }
+  if (tokens.length === 1) out.add(tokens[0]);
+  return Array.from(out);
+}
+
+/**
+ * Rankea productos del menú por cercanía al texto del cliente (ortografía distinta).
+ */
+function rankMenuItemsByFuzzy(userText, menuItems = []) {
+  const normUser = normalizeForItemMatch(userText);
+  if (!normUser) return [];
+  const phrases = buildSlidingPhrasesForFuzzy(normUser);
+
+  const scored = [];
+  for (const item of menuItems) {
+    const ni = normalizeForItemMatch(item?.name);
+    const price = Number(item?.price || 0);
+    if (!ni || !Number.isFinite(price) || price <= 0) continue;
+
+    let best = minLevenshteinRatio(normUser, ni);
+    for (const ph of phrases) {
+      if (ni.length > 8 && ph.length < 4) continue;
+      const r = minLevenshteinRatio(ph, ni);
+      if (r < best) best = r;
+    }
+    scored.push({ item, ratio: best });
+  }
+  scored.sort((a, b) => a.ratio - b.ratio);
+  return scored;
+}
+
+function looksLikeOrderAttemptForFuzzy(text) {
+  const t = normalizeTextForMatch(text).replace(/\s+/g, " ").trim();
+  if (t.length < 8) return false;
+  if (isPureGreeting(text)) return false;
+  if (wantsMenuList(text)) return false;
+  if (/\b(como\s+es|que\s+es|qué\s+es|cuanto\s+cuesta|cuánto\s+cuesta|tienen|tenes|tenés|hay\s+)\b/i.test(t)) {
+    return false;
+  }
+  const orderCue =
+    /\b(quiero|quereria|quería|dame|mandame|necesito|pedir|pedi|traeme|traéme|enviame|enviáme|suma|sumá|agrega|agregá|un pedido|para llevar|para retirar)\b/.test(
+      t
+    ) ||
+    /\b\d+\s/.test(t) ||
+    /\b(un|una|unos|unas|dos|tres|cuatro|cinco)\s+\w{3,}/.test(t);
+  return Boolean(orderCue);
+}
+
+function isAffirmativeFuzzyReply(trimmedText) {
+  const s = normalizeTextForMatch(trimmedText).replace(/[!?.]+$/g, "").trim();
+  return /^(si|sí|sii|dale|ok|okey|oki|confirmo|va|va\s+bien|simon|sep)$/.test(s);
+}
+
+function isNegativeFuzzyReply(trimmedText) {
+  const s = normalizeTextForMatch(trimmedText).replace(/[!?.]+$/g, "").trim();
+  return /^(no|nop|nope|negativo|mejor\s+no|cancelar)$/.test(s) || /^no\s*,?\s*$/i.test(trimmedText.trim());
+}
+
+function clearPendingClarification(session) {
+  if (session) session.pendingClarification = null;
+}
+
+function mergeDirectOrderIntoSessionAndBuildAddMore({
+  session,
+  directOrder,
+  text,
+  updatedMessages,
+  hasConfirmedAddress,
+  addressCheck,
+  menuItems
+}) {
+  const hadPreviousItems =
+    Array.isArray(session.items) && session.items.length > 0 && Number(session.totalAmount) > 0;
+  if (hadPreviousItems) {
+    session.items = [...session.items, ...directOrder.items];
+    session.totalAmount = Number(session.totalAmount) + directOrder.totalAmount;
+    session.details = session.items.join(", ");
+  } else {
+    session.totalAmount = directOrder.totalAmount;
+    session.details = directOrder.details;
+    session.items = directOrder.items;
+    session.fulfillmentType = "";
+  }
+  session.conversationText = updatedMessages.join(" | ");
+  if (hasConfirmedAddress) {
+    session.deliveryAddress = addressCheck.normalizedAddress || text;
+  }
+  session.status = "awaiting_add_more";
+  ensureSessionTotals(session, menuItems);
+  return buildAddMoreQuestion(
+    formatOrderDetailsForDisplay(session.items, session.details),
+    session.totalAmount
+  );
+}
+
+function buildFuzzyClarificationReplySingle(tenant, menuItem) {
+  const bot = resolveBotDisplayName();
+  const brand = resolvePublicBrandName({ restaurant: tenant || {} });
+  return [
+    `*${bot} · ${brand}*`,
+    "",
+    `No encontré el nombre exacto en el menú. ¿Querías pedir *${menuItem.name}* (${formatTotal(menuItem.price)})?`,
+    "",
+    "Respondé *SÍ* para sumarlo al pedido o *NO* si era otra cosa."
+  ].join("\n");
+}
+
+function buildFuzzyClarificationReplyPick(tenant, candidates) {
+  const bot = resolveBotDisplayName();
+  const brand = resolvePublicBrandName({ restaurant: tenant || {} });
+  const lines = candidates.map((c, i) => `${i + 1}. ${c.name} (${formatTotal(c.price)})`);
+  return [
+    `*${bot} · ${brand}*`,
+    "",
+    "No estoy seguro cuál pedías. ¿Alguno de estos?",
+    "",
+    ...lines,
+    "",
+    "Respondé con el número (1, 2 o 3) o *NO* para cancelar."
+  ].join("\n");
+}
+
+/**
+ * Ofrece aclaración fuzzy solo si no hubo match exacto y el texto parece un pedido.
+ * @returns {string|null}
+ */
+function maybeOfferFuzzyOrderClarification(trimmedText, text, session, menuItems, tenant) {
+  if (!menuItems.length) return null;
+  if (session.pendingClarification) return null;
+  if (["awaiting_payment", "awaiting_address"].includes(session.status)) return null;
+  if (resolveMenuListIntent(trimmedText)) return null;
+  if (!looksLikeOrderAttemptForFuzzy(trimmedText)) return null;
+
+  const ranked = rankMenuItemsByFuzzy(text, menuItems);
+  if (!ranked.length || ranked[0].ratio > FUZZY_ORDER_MAX_RATIO) return null;
+
+  const top = ranked[0];
+  const runners = ranked.filter((r) => r.ratio <= FUZZY_ORDER_MAX_RATIO + 0.06).slice(0, 3);
+
+  let mode = "single";
+  let candidates = [{ name: top.item.name, price: Number(top.item.price) }];
+
+  if (
+    runners.length >= 2 &&
+    runners[1].ratio - runners[0].ratio < FUZZY_ORDER_PICK_GAP &&
+    runners[1].ratio <= FUZZY_ORDER_MAX_RATIO + 0.06
+  ) {
+    mode = "pick";
+    candidates = runners.map((r) => ({ name: r.item.name, price: Number(r.item.price) }));
+  }
+
+  session.pendingClarification = {
+    type: "fuzzy_order",
+    mode,
+    candidates,
+    createdAt: Date.now()
+  };
+
+  if (mode === "pick" && candidates.length >= 2) {
+    return buildFuzzyClarificationReplyPick(tenant, candidates);
+  }
+  return buildFuzzyClarificationReplySingle(tenant, top.item);
+}
+
+/**
+ * Responde SÍ/NO/número tras sugerencia fuzzy, o libera pending si el mensaje es otro tema.
+ * @returns {string|null}
+ */
+function handlePendingFuzzyClarification({
+  session,
+  trimmedText,
+  text,
+  menuItems,
+  tenant,
+  updatedMessages,
+  hasConfirmedAddress,
+  addressCheck
+}) {
+  const p = session.pendingClarification;
+  if (!p || p.type !== "fuzzy_order") return null;
+  if (Date.now() - p.createdAt > PENDING_CLARIFICATION_TTL_MS) {
+    clearPendingClarification(session);
+    return null;
+  }
+
+  const t = trimmedText.trim();
+
+  if (isNegativeFuzzyReply(t)) {
+    clearPendingClarification(session);
+    return "Listo. Decime el producto tal como figura en el menú o escribí *menú* para ver la lista completa.";
+  }
+
+  if (p.mode === "pick" && /^[1-3]$/.test(t)) {
+    const idx = parseInt(t, 10) - 1;
+    const chosen = p.candidates[idx];
+    if (chosen) {
+      clearPendingClarification(session);
+      const directOrder = detectDirectMenuOrder(chosen.name, menuItems);
+      if (directOrder) {
+        return mergeDirectOrderIntoSessionAndBuildAddMore({
+          session,
+          directOrder,
+          text,
+          updatedMessages,
+          hasConfirmedAddress,
+          addressCheck,
+          menuItems
+        });
+      }
+    }
+  }
+
+  if (p.mode === "pick" && isAffirmativeFuzzyReply(t) && p.candidates.length >= 1) {
+    clearPendingClarification(session);
+    const directOrder = detectDirectMenuOrder(p.candidates[0].name, menuItems);
+    if (directOrder) {
+      return mergeDirectOrderIntoSessionAndBuildAddMore({
+        session,
+        directOrder,
+        text,
+        updatedMessages,
+        hasConfirmedAddress,
+        addressCheck,
+        menuItems
+      });
+    }
+  }
+
+  const singleYes =
+    p.mode === "single" &&
+    p.candidates.length === 1 &&
+    (isAffirmativeFuzzyReply(t) || /^1$/.test(t.trim()));
+  if (singleYes) {
+    clearPendingClarification(session);
+    const directOrder = detectDirectMenuOrder(p.candidates[0].name, menuItems);
+    if (directOrder) {
+      return mergeDirectOrderIntoSessionAndBuildAddMore({
+        session,
+        directOrder,
+        text,
+        updatedMessages,
+        hasConfirmedAddress,
+        addressCheck,
+        menuItems
+      });
+    }
+  }
+
+  const directAfter = detectDirectMenuOrder(text, menuItems);
+  if (directAfter) {
+    clearPendingClarification(session);
+    return mergeDirectOrderIntoSessionAndBuildAddMore({
+      session,
+      directOrder: directAfter,
+      text,
+      updatedMessages,
+      hasConfirmedAddress,
+      addressCheck,
+      menuItems
+    });
+  }
+
+  if (t.length > 2 && !isAffirmativeFuzzyReply(t) && !isNegativeFuzzyReply(t) && !/^[1-3]$/.test(t)) {
+    clearPendingClarification(session);
+  }
+  return null;
+}
+
 function isShortOptionMessage(text) {
   const option = numericOption(text);
   if (option === 1 || option === 2) return true;
@@ -1514,6 +1808,29 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
     return cancelReply;
   }
 
+  const fuzzyResolvedEarly = handlePendingFuzzyClarification({
+    session,
+    trimmedText,
+    text,
+    menuItems,
+    tenant,
+    updatedMessages,
+    hasConfirmedAddress,
+    addressCheck
+  });
+  if (fuzzyResolvedEarly) {
+    await saveInteraction({
+      restaurantId: tenant.id,
+      customerNumber,
+      botNumber,
+      messageType: "text",
+      userMessage: text,
+      botResponse: fuzzyResolvedEarly,
+      metadata: sessionMetadata(session, { fuzzyClarificationResolved: true })
+    });
+    return fuzzyResolvedEarly;
+  }
+
   const menuListIntent = resolveMenuListIntent(trimmedText);
   if (menuListIntent) {
     let itemsForMessage = menuItems;
@@ -1616,6 +1933,26 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
         metadata: sessionMetadata(session, { accumulated: true })
       });
       return addMoreQuestion;
+    }
+
+    const fuzzyOfferWhileAddMore = maybeOfferFuzzyOrderClarification(
+      trimmedText,
+      text,
+      session,
+      menuItems,
+      tenant
+    );
+    if (fuzzyOfferWhileAddMore) {
+      await saveInteraction({
+        restaurantId: tenant.id,
+        customerNumber,
+        botNumber,
+        messageType: "text",
+        userMessage: text,
+        botResponse: fuzzyOfferWhileAddMore,
+        metadata: sessionMetadata(session, { fuzzyClarificationOffered: true })
+      });
+      return fuzzyOfferWhileAddMore;
     }
 
     if (wantsToCloseOrder(text) || option === 2 || hasAnyPhrase(text, INTENT_PHRASES.noMore)) {
@@ -1885,7 +2222,7 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
         paymentUrl = await createPaymentPreference({
           orderId: order.id,
           totalAmount: session.totalAmount,
-          restaurantName: tenant.name
+          restaurantName: resolvePublicBrandName({ restaurant: tenant || {} })
         });
       } catch (mpError) {
         const mpErrorReply = `No pude generar el link de Mercado Pago. ${mpError.message || ""}`.trim();
@@ -2173,6 +2510,26 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
     });
 
     return addMoreQuestion;
+  }
+
+  const fuzzyOfferBrowsing = maybeOfferFuzzyOrderClarification(
+    trimmedText,
+    text,
+    session,
+    menuItems,
+    tenant
+  );
+  if (fuzzyOfferBrowsing) {
+    await saveInteraction({
+      restaurantId: tenant.id,
+      customerNumber,
+      botNumber,
+      messageType: "text",
+      userMessage: text,
+      botResponse: fuzzyOfferBrowsing,
+      metadata: sessionMetadata(session, { fuzzyClarificationOffered: true })
+    });
+    return fuzzyOfferBrowsing;
   }
 
   if (

@@ -54,7 +54,6 @@ export default function DashboardUsersPanel() {
     password: "",
     role: "delivery",
     label: "",
-    /** Días seleccionados para reparto (0–6). */
     deliveryWeekdays: [...ALL_WEEKDAY_VALUES]
   });
 
@@ -216,7 +215,7 @@ export default function DashboardUsersPanel() {
   return (
     <section className="space-y-4">
       <div className="rounded-xl border border-slate-700 bg-slate-900 p-5">
-        <h2 className="text-sm font-semibold text-slate-200">Usuarios del dashboard</h2>
+        <h2 className="text-sm font-semibold text-slate-200">Usuarios del panel</h2>
         <p className="mt-1 text-xs text-slate-400">
           Altas de cuentas para admin o reparto. Para reparto, elegí los días en que puede iniciar sesión cada usuario.
         </p>

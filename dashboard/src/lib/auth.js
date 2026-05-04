@@ -1,4 +1,3 @@
-// Login con usuario (tabla dashboard_users) o solo contraseña de rol (legado)
 import { supabase } from "../supabaseClient";
 import bcrypt from "bcryptjs";
 import {
@@ -88,7 +87,6 @@ async function loginWithTableUser(username, password) {
   try {
     localStorage.setItem(SESSION_KEY, JSON.stringify(session));
   } catch {
-    // localStorage bloqueado
   }
   return { ok: true, session };
 }
@@ -115,15 +113,10 @@ function loginWithEnvPassword(role, password) {
   try {
     localStorage.setItem(SESSION_KEY, JSON.stringify(session));
   } catch {
-    // noop
   }
   return { ok: true, session };
 }
 
-/**
- * @param {{ role: string, password: string, username?: string }} p
- * @returns {Promise<{ ok: boolean, error?: string, session?: object }>}
- */
 export async function login(p) {
   const username = String(p?.username || "").trim();
   if (username) {
@@ -136,6 +129,5 @@ export function logout() {
   try {
     localStorage.removeItem(SESSION_KEY);
   } catch {
-    // noop
   }
 }

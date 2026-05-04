@@ -1,6 +1,3 @@
-// Helpers compartidos entre las vistas Admin y Delivery.
-// Mantengo la misma semántica de estados que ya usa el bot.
-
 export const ORDER_STATUS_COLORS = {
   awaiting_payment_method: "bg-violet-500/20 text-violet-300 border border-violet-500/30",
   awaiting_delivery_fee: "bg-orange-500/20 text-orange-200 border border-orange-500/40",
@@ -21,7 +18,7 @@ export const ORDER_STATUS_LABELS = {
   awaiting_payment_method: "Esperando método de pago",
   awaiting_delivery_fee: "Esperando costo envío",
   delivery_fee_set: "Costo envío confirmado",
-  awaiting_delivery_total_confirm: "Cliente debe confirmar total (WA)",
+  awaiting_delivery_total_confirm: "Cliente debe confirmar total con envío",
   delivery_denied: "Delivery cancelado",
   delivery_denial_notify_failed: "Aviso cancelación falló",
   notify_failed: "Aviso a cliente falló",
@@ -49,13 +46,11 @@ export function fulfillmentIsDelivery(order) {
   return ft === "delivery";
 }
 
-/** Retiro / pickup en el local (columna `fulfillment_type = local`). */
 export function fulfillmentIsPickup(order) {
   const ft = String(order?.fulfillment_type ?? "").trim().toLowerCase();
   return ft === "local";
 }
 
-/** Efectivo + delivery: el cliente aceptó el total por WhatsApp (nota que agrega el bot). */
 export function notesIndicateCustomerConfirmedDeliveryTotal(order) {
   const n = String(order?.notes ?? "").toLowerCase();
   return (
@@ -66,7 +61,6 @@ export function notesIndicateCustomerConfirmedDeliveryTotal(order) {
   );
 }
 
-/** Pedido en pool: admin ya avisó repartidores y nadie lo tomó aún. */
 export function orderInDeliveryPool(order) {
   return Boolean(order?.delivery_ready_broadcast_at) && !order?.delivery_claimed_by_user_id;
 }
@@ -76,7 +70,6 @@ export function orderClaimedByDeliveryUserId(order) {
   return id ? String(id) : "";
 }
 
-/** Admin puede avisar a repartidores que el pedido está listo para salir (cocina terminada). */
 export function adminCanNotifyDeliveriesReady(order) {
   if (!isDeliveryOrder(order)) return false;
   const st = normalizeOrderStatus(order);
@@ -107,7 +100,6 @@ export function adminShowNotifyDeliveriesReadyButton(order) {
   );
 }
 
-/** Repartidor (sesión con userId): el pedido está en cola y se puede intentar tomar. */
 export function deliveryOrderInOpenPool(order) {
   if (!order?.delivery_ready_broadcast_at) return false;
   if (order.delivery_claimed_by_user_id) return false;
@@ -137,7 +129,6 @@ export function formatDateTime(value) {
   }
 }
 
-/** Misma redacción que genera el bot al cerrar el pedido (histórico); también confía en fulfillment_type. */
 export function notesIndicateDelivery(order) {
   if (fulfillmentIsDelivery(order)) return true;
   const n = String(order?.notes ?? "").toLowerCase();
@@ -168,10 +159,6 @@ export function subtotalForOrder(order) {
   return Number.isFinite(s) ? s : 0;
 }
 
-/**
- * Total a cobrar/registrar al cerrar el pedido.
- * Si hay total final (con envío), prevalece. Si no, el subtotal.
- */
 export function effectiveOrderTotal(order) {
   const ft = Number(order.final_total_amount);
   if (Number.isFinite(ft) && ft > 0) return ft;
@@ -191,33 +178,19 @@ export function playNotification() {
     oscillator.start();
     oscillator.stop(ctx.currentTime + 0.15);
   } catch {
-    // El usuario aún no interactuó con el tab; el browser bloquea audio.
   }
 }
 
-/**
- * Lista plana de items normalizados a string. El bot guarda `items` como
- * array de nombres (string), pero por compat aceptamos también objetos.
- */
-/**
- * Devuelve un telefono "llamable" (string de digitos) priorizando
- * `customer_phone` (resuelto por el bot via Contact) y cayendo al
- * `customer_number`. Si nada parece telefono real (tipico cuando el cliente
- * usa @lid y WhatsApp no expone el numero), devuelve null.
- */
 export function callableCustomerPhone(order) {
   const candidates = [order?.customer_phone, order?.customer_number];
   for (const raw of candidates) {
     const digits = String(raw || "").replace(/\D/g, "");
     if (!digits) continue;
-    // E.164 valido razonable: 8 a 15 digitos. LIDs tipicos son ~15 sin
-    // estructura de pais; siendo cautos, dejamos pasar hasta 14.
     if (digits.length >= 8 && digits.length <= 14) return digits;
   }
   return null;
 }
 
-/** Presentacion legible de digitos (ARG movil u otros). Solo display. */
 export function formatPhoneLabel(digits) {
   const d = String(digits || "").replace(/\D/g, "");
   if (!d) return "";
@@ -259,7 +232,6 @@ function groupPlainNames(names) {
   return { order, counts };
 }
 
-/** Una línea tipo "mariolis x6, pizza x2" a partir de nombres repetidos. */
 export function formatGroupedItemLine(names) {
   const { order, counts } = groupPlainNames(names);
   return order
@@ -270,16 +242,12 @@ export function formatGroupedItemLine(names) {
     .join(", ");
 }
 
-/** Para UI de delivery/admin: filas con nombre y cantidad. */
 export function groupOrderItemRows(order) {
   const names = flattenOrderItems(order);
   const { order: ord, counts } = groupPlainNames(names);
   return ord.map((name) => ({ name, count: counts.get(name) }));
 }
 
-/**
- * Notas legibles: agrupa ítems en Detalle, saca modalidad y dirección (ya están en otros campos).
- */
 export function formatOrderNotesForDisplay(rawNotes) {
   const s = String(rawNotes || "").trim();
   if (!s) return "";

@@ -261,16 +261,23 @@ async function updateOrderMatching(orderId, patch, constraints = {}) {
   return data || null;
 }
 
+/**
+ * Marca visible para el cliente: `public_name` (dashboard), si no `name`.
+ * Para mensajes, tickets y MP — no el nombre interno si hay marca pública.
+ */
 async function getRestaurantNameById(restaurantId) {
   const { data, error } = await supabase
     .from(TABLES.restaurants)
-    .select("name")
+    .select("name, public_name")
     .eq("id", restaurantId)
     .maybeSingle();
   if (error) {
     throw new Error(`Error consultando restaurante: ${error.message}`);
   }
-  return data?.name || "Restaurante";
+  if (!data) return "Restaurante";
+  const pub = String(data.public_name || "").trim();
+  if (pub) return pub;
+  return String(data.name || "").trim() || "Restaurante";
 }
 
 /**

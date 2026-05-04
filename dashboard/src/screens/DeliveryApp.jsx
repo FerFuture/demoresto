@@ -19,12 +19,7 @@ import {
   playNotification
 } from "../lib/format";
 
-/**
- * Ventana de carga de filas para cola / activos / realtime. Los entregados viejos no se listan en UI
- * (solo se muestran los aún reversibles; ver partitioned.doneToday).
- */
 const TODAY_HISTORY_HOURS = 18;
-/** Tras marcar entregado, solo este tiempo se puede deshacer desde delivery (alinear con política operativa). */
 const REVERT_DELIVERY_WINDOW_MS = 15 * 60 * 1000;
 
 export default function DeliveryApp({ onLogout }) {
@@ -38,7 +33,6 @@ export default function DeliveryApp({ onLogout }) {
   const [confirmDialog, setConfirmDialog] = useState(null);
   const confirmResolverRef = useRef(null);
   const [issueDialog, setIssueDialog] = useState(null);
-  /** Errores del envío del reporte (van en el modal; el banner principal queda tapado por el modal). */
   const [issueDialogError, setIssueDialogError] = useState("");
   const [scheduleGate, setScheduleGate] = useState(() => {
     const s = getSession();
@@ -115,7 +109,7 @@ export default function DeliveryApp({ onLogout }) {
         return;
       }
       if (!data) {
-        setError("No se encontró el restaurante asociado a este dashboard.");
+        setError("No se encontró el restaurante asociado a este panel.");
         return;
       }
       setRestaurantId(data.id);
@@ -228,7 +222,6 @@ export default function DeliveryApp({ onLogout }) {
       const st = normalizeOrderStatus(order);
 
       if (st === "delivered") {
-        // No listar historial de entregas: solo lo reciente mientras aplica "Revertir entrega".
         if (
           (!userId || order.delivery_claimed_by_user_id === userId) &&
           canRevertDeliveredWithinWindow(order)
@@ -389,7 +382,7 @@ export default function DeliveryApp({ onLogout }) {
     const ok = await requestConfirm({
       title: "Cancelar pedido por incidencia",
       message:
-        "El pedido quedará cancelado y el restaurante puede verlo en el panel admin. Esta acción no envía WhatsApp al cliente por sí sola. ¿Confirmás la cancelación?",
+        "El pedido quedará cancelado y lo verán en administración. Esta acción no envía un mensaje al cliente sola. ¿Confirmás la cancelación?",
       confirmLabel: "Sí, cancelar pedido",
       cancelLabel: "Volver",
       tone: "danger"
@@ -495,10 +488,6 @@ export default function DeliveryApp({ onLogout }) {
     setSavingOrderId(null);
   }
 
-  /**
-   * Deshace un "Cobrado y entregado" por error: vuelve a confirmado para reparto.
-   * Si el cobro en efectivo se marcó junto con la entrega, también revierte el pago.
-   */
   async function revertDelivered(order) {
     if (normalizeOrderStatus(order) !== "delivered") {
       setError("Este pedido no está marcado como entregado.");
@@ -743,7 +732,6 @@ export default function DeliveryApp({ onLogout }) {
   );
 }
 
-/** @param {object} order */
 function canRevertDeliveredWithinWindow(order) {
   if (normalizeOrderStatus(order) !== "delivered") return false;
   const t = order.delivered_at ? new Date(order.delivered_at).getTime() : NaN;
@@ -919,7 +907,7 @@ function DeliveryOrderCard({
 
         {variant === "active" && order.delivery_en_route_customer_notified_at ? (
           <p className="rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-[11px] leading-snug text-sky-100/95">
-            El cliente recibió un WhatsApp de que el pedido va en camino
+            El cliente recibió aviso de que el pedido va en camino
             {formatDateTime(order.delivery_en_route_customer_notified_at)
               ? ` · ${formatDateTime(order.delivery_en_route_customer_notified_at)}`
               : ""}
@@ -1015,10 +1003,6 @@ function InfoRow({ label, value, children, accent }) {
   );
 }
 
-/**
- * Si el pedido fue creado con `address` vacío pero las notas del bot incluyen
- * "Direccion: ...", la sacamos para que el repartidor la vea de una.
- */
 function extractAddressFromNotes(notes) {
   if (!notes) return "";
   const m = String(notes).match(/direcci[oó]n:\s*([^\n|]+)/i);

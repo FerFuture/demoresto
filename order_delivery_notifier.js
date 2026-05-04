@@ -193,7 +193,9 @@ async function processDeliveryFeeReadyOrder(orderRow, whatsappClient) {
 
     const nameFromDb = await getRestaurantNameById(orderRow.restaurant_id);
     const restaurantName =
-      (process.env.RESTAURANT_PUBLIC_NAME || "").trim() || nameFromDb || "Restaurante Palermo";
+      String(nameFromDb || "").trim() ||
+      (process.env.RESTAURANT_PUBLIC_NAME || "").trim() ||
+      "Tu restaurante";
     const subtotalResolved = resolveSubtotalForTicket(orderRow, finalTotal, fee);
     const ticketBlock = buildDeliveryTicketBlock({
       restaurantName,

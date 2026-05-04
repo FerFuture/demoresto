@@ -23,7 +23,6 @@ import AdminStats from "./AdminStats";
 import DashboardUsersPanel from "./DashboardUsersPanel";
 import OrdersDateRangeCalendar from "../components/OrdersDateRangeCalendar";
 
-/** Fecha local yyyy-mm-dd (zona horaria del navegador). */
 function localDateKey(d = new Date()) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -37,11 +36,6 @@ function effectiveOrderFilters(filters, todayOnly) {
   return { ...filters, dateFrom: t, dateTo: t };
 }
 
-/**
- * Límites del día calendario **local del navegador** para filtrar `created_at`
- * (timestamptz en Supabase). Sin esto, `yyyy-mm-ddT00:00:00` sin offset se
- * interpreta mal y aparecen pedidos del día anterior (ej. 30/4 viendo “solo hoy” 1/5).
- */
 function localDateKeyBoundsMs(dateKey) {
   const [y, m, d] = String(dateKey || "")
     .split("-")
@@ -67,16 +61,11 @@ export default function AdminApp({ onLogout }) {
   const [activeTab, setActiveTab] = useState("orders");
   const [orders, setOrders] = useState([]);
   const [deliveryUserLabels, setDeliveryUserLabels] = useState({});
-  /** Tamano de pagina del listado de pedidos (cargar mas). */
   const ORDERS_PAGE_SIZE = 30;
   const [ordersPage, setOrdersPage] = useState(0);
   const [ordersTotal, setOrdersTotal] = useState(0);
   const [ordersHasMore, setOrdersHasMore] = useState(false);
   const [loadingMoreOrders, setLoadingMoreOrders] = useState(false);
-  /**
-   * Filtros aplicados al listado y a las suscripciones realtime.
-   * `dateFrom`/`dateTo` son strings ISO (yyyy-mm-dd).
-   */
   const [orderFilters, setOrderFilters] = useState({
     status: "all",
     paymentMethod: "all",
@@ -104,9 +93,7 @@ export default function AdminApp({ onLogout }) {
     price: ""
   });
   const [error, setError] = useState("");
-  /** Borrador de costo envío por id de pedido (solo UI). */
   const [feeDraftByOrder, setFeeDraftByOrder] = useState({});
-  /** Panel de negar delivery: pedido con textarea abierto + motivo por id. */
   const [denyExpandedOrderId, setDenyExpandedOrderId] = useState(null);
   const [denyReasonByOrder, setDenyReasonByOrder] = useState({});
   const [editingItemId, setEditingItemId] = useState(null);
@@ -116,7 +103,6 @@ export default function AdminApp({ onLogout }) {
     category: "",
     price: ""
   });
-  /** Configuracion editable del restaurante (pestana "Configuración"). */
   const [restaurantConfig, setRestaurantConfig] = useState({
     name: "",
     public_name: "",
@@ -128,13 +114,8 @@ export default function AdminApp({ onLogout }) {
   const [loadingConfig, setLoadingConfig] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [configFlash, setConfigFlash] = useState("");
-  /**
-   * Modal de confirmación in-page (reemplazo estético de window.confirm).
-   * `tone` controla colores ("danger" rojo, "warning" ámbar, "info" azul).
-   */
   const [confirmDialog, setConfirmDialog] = useState(null);
   const confirmResolverRef = useRef(null);
-  /** Para pasar de día sin recargar la pestaña cuando la vista es "solo hoy". */
   const ordersCalendarDayRef = useRef(localDateKey());
 
   function requestConfirm({
@@ -172,10 +153,6 @@ export default function AdminApp({ onLogout }) {
     [sortedOrders]
   );
 
-  /**
-   * Aplica los filtros activos a una query Supabase de la tabla `orders`.
-   * Devuelve la query mutada (la API es chainable).
-   */
   function applyOrderFilters(query, filters = orderFilters) {
     let q = query;
     if (filters.status && filters.status !== "all") {
@@ -206,10 +183,6 @@ export default function AdminApp({ onLogout }) {
     return q;
   }
 
-  /**
-   * Verifica en cliente si una fila cumple los filtros activos. Permite que el
-   * realtime decida si una fila entra o sale de la vista paginada.
-   */
   function orderMatchesFilters(order, filters = orderFilters) {
     if (!order) return false;
     if (filters.status !== "all" && String(order.status || "") !== filters.status) return false;
@@ -428,7 +401,7 @@ export default function AdminApp({ onLogout }) {
       });
       if (data.name) setRestaurantName(data.name);
     }
-    setConfigFlash("Configuración guardada. Los cambios aplican al próximo mensaje (cache de IA refresca a los 5 minutos).");
+    setConfigFlash("Configuración guardada. Los cambios se aplican en los próximos mensajes al cliente.");
     setSavingConfig(false);
     setTimeout(() => setConfigFlash(""), 6000);
   }
@@ -450,13 +423,9 @@ export default function AdminApp({ onLogout }) {
     setSavingOrderId(null);
   }
 
-  /**
-   * Confirma el cobro en efectivo del pedido. Marca el pedido como confirmado
-   * y registra el momento del pago. Solo aplica cuando `payment_method = efectivo`.
-   */
   async function confirmCashPayment(order) {
     if (paymentMethodKey(order) !== "cash") {
-      setError("Solo los pedidos en efectivo se confirman manualmente desde el dashboard.");
+      setError("Solo los pedidos en efectivo se confirman manualmente desde este panel.");
       return;
     }
     setError("");
@@ -491,9 +460,6 @@ export default function AdminApp({ onLogout }) {
     setSavingOrderId(null);
   }
 
-  /**
-   * Retiro en local: el admin solicita avisar al cliente; el bot envía WhatsApp al procesar la cola.
-   */
   async function requestPickupReadyNotify(order) {
     const st = normalizeOrderStatus(order);
     if (st !== "confirmed") {
@@ -537,12 +503,6 @@ export default function AdminApp({ onLogout }) {
     setSavingOrderId(null);
   }
 
-  /**
-   * Revierte una confirmación de pago en efectivo hecha por error desde el
-   * dashboard. Vuelve el pedido a `pending` y limpia el registro de pago.
-   * Solo se permite para pedidos en efectivo que aún no fueron entregados ni
-   * cancelados; si MP ya aprobó el pago, no debe usarse.
-   */
   async function revertCashPayment(order) {
     if (paymentMethodKey(order) !== "cash") {
       setError("Solo se puede revertir el pago en pedidos en efectivo.");
@@ -597,10 +557,6 @@ export default function AdminApp({ onLogout }) {
     setSavingOrderId(null);
   }
 
-  /**
-   * Marca el pedido como entregado y registra `delivered_at`. Solo aplica a
-   * pedidos que aún no estaban entregados ni cancelados.
-   */
   async function markDelivered(order) {
     const st = normalizeOrderStatus(order);
     if (st === "delivered" || st === "cancelled") {
@@ -639,10 +595,6 @@ export default function AdminApp({ onLogout }) {
     setSavingOrderId(null);
   }
 
-  /**
-   * Cancela el pedido y registra `cancelled_at`. No emite refunds ni
-   * notificaciones automáticas.
-   */
   async function markCancelled(order) {
     const st = normalizeOrderStatus(order);
     if (st === "cancelled") {
@@ -693,10 +645,6 @@ export default function AdminApp({ onLogout }) {
     setSavingOrderId(null);
   }
 
-  /**
-   * Cierra el aviso rojo de incidencia de reparto. Si el pedido sigue activo, lo cancela
-   * y deja constancia en `delivery_issue_acknowledged_at` (flujo distinto del «Cancelar» genérico).
-   */
   async function resolveDeliveryIssueAsAdmin(order) {
     if (!order.delivery_issue_reason || order.delivery_issue_acknowledged_at) return;
 
@@ -774,11 +722,6 @@ export default function AdminApp({ onLogout }) {
     }
   }
 
-  /**
-   * Revierte un pedido cerrado (delivered/cancelled) al estado activo previo
-   * que mejor refleja la situación: `confirmed` si el pago ya estaba
-   * registrado, o `pending` en caso contrario. Limpia los timestamps de cierre.
-   */
   async function revertClosedOrder(order, fromStatus) {
     const st = normalizeOrderStatus(order);
     if (st !== fromStatus) {
@@ -987,20 +930,10 @@ export default function AdminApp({ onLogout }) {
     setSavingOrderId(null);
   }
 
-  /**
-   * Envía un pedido cash-on-delivery al repartidor sin marcar el pago.
-   * El cobro lo hace el delivery al entregar (botón "Cobrado y entregado").
-   * Aplica solo a pedidos de delivery, en efectivo, sin pago aprobado y con el
-   * costo de envío ya pactado (estado pending o delivery_fee_set).
-   */
-  /**
-   * Avisa a los repartidores que el pedido está listo para salir (ej. ya cocinado).
-   * No cambia el estado del pedido ni el pago: efectivo sigue pendiente hasta que el reparto cobre al entregar.
-   */
   async function notifyDeliveriesOrderReady(order) {
     if (!adminShowNotifyDeliveriesReadyButton(order)) {
       setError(
-        "Solo se puede avisar cuando el cliente confirmó el total por WhatsApp (efectivo) o el pago ya está aprobado (Mercado Pago), y el costo de envío está definido."
+        "Solo podés avisar cuando el cliente confirmó el total (efectivo) o el pago ya está aprobado, y el costo de envío está cargado."
       );
       return;
     }
@@ -1112,7 +1045,6 @@ export default function AdminApp({ onLogout }) {
     loadOrders(restaurantId, { page: 0, filters: orderFilters });
     loadMenu();
     loadRestaurantConfig(restaurantId);
-    // Cargas iniciales: solo cuando cambia el restaurante.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [restaurantId]);
 
@@ -1158,13 +1090,11 @@ export default function AdminApp({ onLogout }) {
             const exists = prev.some((row) => row.id === payload.new.id);
             if (exists) {
               if (!matches) {
-                // Cambió de estado y ya no entra en la vista actual: lo retiramos.
                 setHiddenUpdatesCount((c) => c + 1);
                 return prev.filter((row) => row.id !== payload.new.id);
               }
               return prev.map((row) => (row.id === payload.new.id ? payload.new : row));
             }
-            // No estaba en el array: si ahora matchea Y es mas reciente, prependeamos.
             if (matches && prev.length) {
               const newCreated = new Date(payload.new.created_at).getTime();
               const topCreated = new Date(prev[0].created_at).getTime();
@@ -1182,8 +1112,6 @@ export default function AdminApp({ onLogout }) {
     return () => {
       supabase.removeChannel(channel);
     };
-    // Re-suscribirse cuando cambian filtros para que las closures usen los
-    // filtros vigentes (incluye "solo hoy").
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [restaurantId, orderFilters, ordersTodayOnly]);
 
@@ -1193,7 +1121,6 @@ export default function AdminApp({ onLogout }) {
     }
   }, [ordersTodayOnly]);
 
-  /** Si la vista es "solo hoy", al cambiar la fecha local vaciamos la lista al nuevo día. */
   useEffect(() => {
     if (!restaurantId || !ordersTodayOnly) return undefined;
 
@@ -1332,7 +1259,7 @@ export default function AdminApp({ onLogout }) {
       <div className="mx-auto max-w-7xl p-6">
         <header className="mb-6 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold">RestoBot Dashboard</h1>
+            <h1 className="text-2xl font-bold">RestoBot · Panel</h1>
             <p className="text-sm text-slate-400">Gestion de pedidos y menu en tiempo real</p>
             {restaurantName ? (
               <p className="mt-1 text-xs text-slate-500">Restaurante activo: {restaurantName}</p>
@@ -1432,7 +1359,7 @@ export default function AdminApp({ onLogout }) {
             {hiddenUpdatesCount > 0 ? (
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200">
                 <span>
-                  {hiddenUpdatesCount} actualización(es) no visible(s) con los filtros actuales.
+                  Hay cambios o pedidos nuevos que no coinciden con el filtro actual. Podés recargar la lista.
                 </span>
                 <button
                   type="button"
@@ -1684,7 +1611,7 @@ export default function AdminApp({ onLogout }) {
                         {order.delivery_en_route_customer_notified_at &&
                         formatPaidAt(order.delivery_en_route_customer_notified_at) ? (
                           <p className="mt-2 border-t border-emerald-500/20 pt-2 text-xs text-sky-200/90">
-                            Cliente avisado por WhatsApp (en camino) ·{" "}
+                            Cliente avisado (en camino) ·{" "}
                             {formatPaidAt(order.delivery_en_route_customer_notified_at)}
                           </p>
                         ) : null}
@@ -1722,8 +1649,9 @@ export default function AdminApp({ onLogout }) {
                       <div className="md:col-span-2 space-y-3 rounded-lg border border-orange-500/35 bg-orange-950/20 p-4">
                         <p className="text-sm font-semibold text-orange-200">Esperando costo de envío</p>
                         <p className="text-xs text-slate-400">
-                          Ingresá el envío en ARS (debe ser mayor a 0). Se calcula el total final y el bot avisa
-                          por WhatsApp. Si no llegamos a esa zona, usá &quot;Negar delivery&quot; y el motivo.
+                          Ingresá el envío en ARS (debe ser mayor a 0). Se calcula el total y se avisa al cliente por
+                          el canal de mensajes. Si no llegamos a esa zona, usá &quot;Negar delivery&quot; y el
+                          motivo.
                           {normalizeOrderStatus(order) === "pending" ? (
                             <span className="block pt-1 text-orange-200/90">
                               (Pedido en estado &quot;pending&quot; pero detectado como delivery: confirmá envío o
@@ -1769,7 +1697,7 @@ export default function AdminApp({ onLogout }) {
                         {denyExpandedOrderId === order.id ? (
                           <div className="space-y-2 border-t border-orange-500/25 pt-3">
                             <label className="block text-xs text-slate-400">
-                              Motivo (se envía por WhatsApp al cliente)
+                              Motivo (se comunica al cliente)
                             </label>
                             <textarea
                               rows={3}
@@ -1798,14 +1726,15 @@ export default function AdminApp({ onLogout }) {
 
                     {order.status === "delivery_denied" && !order.customer_notified_at ? (
                       <div className="md:col-span-2 rounded-lg border border-amber-500/35 bg-amber-950/20 p-3 text-xs text-amber-100">
-                        Cancelación por delivery en curso: el bot debe avisar al cliente por WhatsApp en segundos.
+                        Se está avisando al cliente sobre la cancelación del delivery.
                       </div>
                     ) : null}
 
                     {order.status === "delivery_denial_notify_failed" ? (
                       <div className="md:col-span-2 flex flex-wrap items-center gap-2 rounded-lg border border-rose-500/40 bg-rose-950/25 p-3">
                         <p className="text-xs text-rose-100">
-                          No se pudo enviar el aviso de cancelación por WhatsApp. Revisá el bot y reintentá.
+                          No se pudo enviar el aviso de cancelación al cliente. Reintentá o contactá soporte si sigue
+                          fallando.
                         </p>
                         <button
                           type="button"
@@ -1820,17 +1749,16 @@ export default function AdminApp({ onLogout }) {
 
                     {order.status === "delivery_fee_set" && !order.customer_notified_at ? (
                       <div className="md:col-span-2 rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-3 text-xs text-cyan-100">
-                        Costo confirmado. El bot debe enviar el total por WhatsApp en segundos. Si el contenedor
-                        estaba apagado, reiniciá el bot y usá &quot;Reintentar WhatsApp&quot; si falló.
+                        Costo confirmado. El total se envía al cliente.
                       </div>
                     ) : null}
 
                     {order.status === "awaiting_delivery_total_confirm" ? (
                       <div className="md:col-span-2 rounded-lg border border-indigo-500/35 bg-indigo-950/25 p-3 text-xs text-indigo-100">
                         <span className="font-semibold text-indigo-50">Efectivo + delivery:</span> el cliente ya
-                        recibió el ticket con el total. Estado interno: esperando que responda{" "}
-                        <span className="font-medium">SÍ</span> o <span className="font-medium">NO</span> por
-                        WhatsApp. Si acepta, el pedido pasa a pendiente y verás en notas:{" "}
+                        recibió el ticket con el total. Estamos esperando que responda{" "}
+                        <span className="font-medium">SÍ</span> o <span className="font-medium">NO</span> por el canal
+                        de mensajes. Si acepta, el pedido pasa a pendiente y verás en notas:{" "}
                         <span className="italic">&quot;Cliente confirmó el total con envío&quot;</span>. Si rechaza,
                         el pedido se cancela solo.
                       </div>
@@ -1839,7 +1767,7 @@ export default function AdminApp({ onLogout }) {
                     {order.status === "notify_failed" ? (
                       <div className="md:col-span-2 flex flex-wrap items-center gap-2 rounded-lg border border-rose-500/40 bg-rose-950/25 p-3">
                         <p className="text-xs text-rose-100">
-                          No se pudo enviar WhatsApp al cliente. Revisá el bot y reintentá.
+                          No se pudo enviar el mensaje al cliente. Reintentá o contactá soporte si sigue fallando.
                         </p>
                         <button
                           type="button"
@@ -1847,7 +1775,7 @@ export default function AdminApp({ onLogout }) {
                           onClick={() => retryNotifyCustomer(order.id)}
                           className="rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-semibold text-slate-950"
                         >
-                          Reintentar WhatsApp
+                          Reintentar aviso
                         </button>
                       </div>
                     ) : null}
@@ -1996,7 +1924,7 @@ export default function AdminApp({ onLogout }) {
                               ) : null}
                               {isDeliveryOrder(order) && order.delivery_en_route_customer_notified_at ? (
                                 <span className="text-[11px] font-medium text-sky-200/95">
-                                  Cliente avisado por WhatsApp (repartidor en camino)
+                                  Cliente avisado (repartidor en camino)
                                   {formatPaidAt(order.delivery_en_route_customer_notified_at)
                                     ? ` · ${formatPaidAt(order.delivery_en_route_customer_notified_at)}`
                                     : ""}
@@ -2020,7 +1948,7 @@ export default function AdminApp({ onLogout }) {
                               order.pickup_ready_notify_requested_at &&
                               !order.pickup_ready_customer_notified_at ? (
                                 <span className="text-[11px] text-slate-400">
-                                  Enviando aviso al cliente por WhatsApp…
+                                  Enviando aviso al cliente…
                                 </span>
                               ) : null}
                               {fulfillmentIsPickup(order) && order.pickup_ready_customer_notified_at ? (
@@ -2281,7 +2209,7 @@ export default function AdminApp({ onLogout }) {
                 Configuración del restaurante
               </h2>
               <p className="text-xs text-slate-400">
-                Horario, ubicación, zonas de delivery y políticas que usa el canal de WhatsApp del negocio.
+                Horario, ubicación, zonas de delivery y políticas que el negocio usa al atender consultas de clientes.
               </p>
             </div>
 
@@ -2338,8 +2266,7 @@ export default function AdminApp({ onLogout }) {
                     className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"
                   />
                   <span className="block text-xs text-slate-500">
-                    Si está vacío, el bot le dirá al cliente que la dirección no está cargada
-                    en lugar de inventar una.
+                    Si está vacío, se informará que la dirección del local no está cargada.
                   </span>
                 </label>
 
@@ -2357,7 +2284,7 @@ export default function AdminApp({ onLogout }) {
                     className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"
                   />
                   <span className="block text-xs text-slate-500">
-                    Texto libre. El bot lo lee tal cual cuando le preguntan por el horario.
+                    Texto libre para cuando preguntan por el horario de atención.
                   </span>
                 </label>
 
@@ -2392,7 +2319,7 @@ export default function AdminApp({ onLogout }) {
                     className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
                   />
                   <span className="block text-xs text-slate-500">
-                    Información adicional que querés que el bot tenga en cuenta al responder.
+                    Información adicional para las respuestas automáticas a clientes.
                   </span>
                 </label>
 
@@ -2463,7 +2390,7 @@ function OrdersFilterBar({ filters, todayOnly, onApply, onReset, total, shown })
     },
     { value: "delivery_denied", label: "Delivery negado" },
     { value: "delivery_denial_notify_failed", label: "Falló aviso cancelación" },
-    { value: "notify_failed", label: "Falló WhatsApp" },
+    { value: "notify_failed", label: "Falló aviso al cliente" },
     { value: "confirmed", label: "Confirmados" },
     { value: "delivered", label: "Entregados" },
     { value: "cancelled", label: "Cancelados" }
