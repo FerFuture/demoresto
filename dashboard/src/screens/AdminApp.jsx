@@ -23,6 +23,23 @@ import AdminStats from "./AdminStats";
 import DashboardUsersPanel from "./DashboardUsersPanel";
 import OrdersDateRangeCalendar from "../components/OrdersDateRangeCalendar";
 
+const CANCEL_REVERT_WINDOW_MS = 30 * 60 * 1000;
+
+function canRevertCancellation(order) {
+  if (normalizeOrderStatus(order) !== "cancelled") return false;
+  const at = order.cancelled_at;
+  if (!at) return true;
+  return Date.now() - new Date(at).getTime() <= CANCEL_REVERT_WINDOW_MS;
+}
+
+function shouldShowDeliveryRepartoSection(order) {
+  if (!isDeliveryOrder(order)) return false;
+  if (normalizeOrderStatus(order) === "cancelled" && !order.delivery_claimed_by_user_id) {
+    return false;
+  }
+  return true;
+}
+
 function localDateKey(d = new Date()) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -726,6 +743,12 @@ export default function AdminApp({ onLogout }) {
     const st = normalizeOrderStatus(order);
     if (st !== fromStatus) {
       setError("El pedido ya no está en ese estado. Recargá la lista.");
+      return;
+    }
+    if (fromStatus === "cancelled" && !canRevertCancellation(order)) {
+      setError(
+        "Solo podés revertir la cancelación dentro de los primeros 30 minutos desde que se canceló."
+      );
       return;
     }
     const label = fromStatus === "delivered" ? "entrega" : "cancelación";
@@ -1564,7 +1587,7 @@ export default function AdminApp({ onLogout }) {
                       <span className="text-slate-500">Notas:</span>{" "}
                       {formatOrderNotesForDisplay(order.notes) || order.raw_request || "-"}
                     </p>
-                    {isDeliveryOrder(order) ? (
+                    {shouldShowDeliveryRepartoSection(order) ? (
                       <div
                         className={`md:col-span-2 rounded-lg border px-3 py-2.5 text-sm ${
                           order.delivery_claimed_by_user_id
@@ -1869,15 +1892,17 @@ export default function AdminApp({ onLogout }) {
                                   </span>
                                 ) : null}
                               </span>
-                              <button
-                                type="button"
-                                disabled={savingOrderId === order.id}
-                                onClick={() => revertClosedOrder(order, "cancelled")}
-                                className="rounded-md border border-amber-400/50 bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-200 hover:bg-amber-500/25 disabled:opacity-50"
-                                title="Reabrir el pedido"
-                              >
-                                Revertir cancelación
-                              </button>
+                              {canRevertCancellation(order) ? (
+                                <button
+                                  type="button"
+                                  disabled={savingOrderId === order.id}
+                                  onClick={() => revertClosedOrder(order, "cancelled")}
+                                  className="rounded-md border border-amber-400/50 bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-200 hover:bg-amber-500/25 disabled:opacity-50"
+                                  title="Reabrir el pedido"
+                                >
+                                  Revertir cancelación
+                                </button>
+                              ) : null}
                             </div>
                           ) : (
                             <div className="flex flex-wrap gap-2">
