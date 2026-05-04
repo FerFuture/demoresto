@@ -566,11 +566,19 @@ function rehydrateSessionFromHistory(session, recentHistory) {
       return session;
     }
 
-    if (!CHECKOUT_STATUSES.includes(meta.status)) continue;
-
     const totalAmount = Number(meta.totalAmount || 0);
     const items = Array.isArray(meta.items) ? meta.items.filter(Boolean) : [];
     const details = String(meta.details || "").trim();
+
+    /**
+     * Estados con checkout activo. Incluye `browsing` solo si el metadata trae carrito:
+     * tras "1" (agregar más) se guardaba status browsing y rehidratar ignoraba ese turno,
+     * perdiendo items al reiniciar el proceso o al vaciar RAM antes del siguiente producto.
+     */
+    const checkoutLike =
+      CHECKOUT_STATUSES.includes(meta.status) ||
+      (meta.status === "browsing" && (totalAmount > 0 || items.length > 0));
+    if (!checkoutLike) continue;
 
     if (!totalAmount && !items.length) continue;
 
@@ -582,7 +590,10 @@ function rehydrateSessionFromHistory(session, recentHistory) {
       return session;
     }
 
-    session.status = meta.status;
+    session.status =
+      meta.status === "browsing" && (totalAmount > 0 || items.length > 0)
+        ? "awaiting_add_more"
+        : meta.status;
     session.totalAmount = totalAmount;
     session.details = details || items.join(", ");
     session.items = items.length ? items : details ? [details] : [];
@@ -1622,7 +1633,9 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
     }
 
     if (option === 1 || hasAnyPhrase(text, [...INTENT_PHRASES.confirmSelection, ...INTENT_PHRASES.addMore])) {
-      session.status = "browsing";
+      // Mantener awaiting_add_more: si pasamos a browsing, el metadata guardado no rehidrata
+      // (browsing no está en CHECKOUT_STATUSES) y el siguiente producto reemplaza el carrito.
+      session.status = "awaiting_add_more";
       const addMoreReply = `${buildMenuLinesForWhatsApp(menuItems, tenant)}\n\nPerfecto, decime qué más querés agregar.`;
       await saveInteraction({
         restaurantId: tenant.id,
