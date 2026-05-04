@@ -5,7 +5,7 @@ const supabaseKey = import.meta.env.VITE_SUPABASE_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
   // eslint-disable-next-line no-console
-  console.error("Faltan credenciales de Supabase para el dashboard.");
+  console.error("Faltan credenciales de acceso al panel.");
 }
 
 export const supabase = createClient(supabaseUrl, supabaseKey);

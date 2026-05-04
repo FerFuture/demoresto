@@ -1,6 +1,4 @@
-// Login: 1) usuario + contraseña contra tabla `dashboard_users` (Supabase)
-// 2) sin usuario: legado con VITE_ADMIN_PASSWORD / VITE_DELIVERY_PASSWORD
-
+// Login con usuario (tabla dashboard_users) o solo contraseña de rol (legado)
 import { supabase } from "../supabaseClient";
 import bcrypt from "bcryptjs";
 import {
@@ -43,7 +41,7 @@ async function loginWithTableUser(username, password) {
     .trim()
     .toLowerCase();
   if (!norm) {
-    return { ok: false, error: "Ingresá un usuario o usá el modo contraseña .env sin usuario." };
+    return { ok: false, error: "Ingresá un usuario o usá la contraseña del rol sin completar usuario." };
   }
   const { data, error } = await supabase
     .from(DASHBOARD_USERS_TABLE)
@@ -55,8 +53,7 @@ async function loginWithTableUser(username, password) {
     if (error.code === "42P01" || (error.message || "").includes("does not exist")) {
       return {
         ok: false,
-        error:
-          "La tabla de usuarios no está creada. Ejecutá el SQL en dashboard/sql/dashboard_users.sql o usá el login por .env dejando el usuario vacío."
+        error: "Acceso de usuarios no disponible. Contactá al administrador."
       };
     }
     return { ok: false, error: `Error de acceso: ${error.message}` };
@@ -104,7 +101,7 @@ function loginWithEnvPassword(role, password) {
   if (!expected) {
     return {
       ok: false,
-      error: `No hay contraseña configurada para "${ROLE_LABELS[role]}". Definí VITE_${role.toUpperCase()}_PASSWORD en el .env del dashboard.`
+      error: `No hay acceso configurado para "${ROLE_LABELS[role]}". Contactá al administrador.`
     };
   }
   if (String(password || "") !== expected) {

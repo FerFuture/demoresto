@@ -271,7 +271,7 @@ export default function DeliveryApp({ onLogout }) {
   async function claimOrder(order) {
     const session = getSession();
     if (!session?.userId) {
-      setError("Iniciá sesión con tu usuario de repartidor (panel Admin → Usuarios) para tomar pedidos de la cola.");
+      setError("Iniciá sesión con tu usuario de repartidor para tomar pedidos.");
       return;
     }
     setError("");
@@ -345,18 +345,11 @@ export default function DeliveryApp({ onLogout }) {
         .maybeSingle();
 
       if (updateError) {
-        const hint =
-          (updateError.message || "").includes("column") ||
-          (updateError.message || "").includes("schema cache")
-            ? " Si acabás de desplegar cambios, ejecutá en Supabase el SQL `dashboard/sql/orders_delivery_dispatch.sql`."
-            : "";
-        setIssueDialogError(`No se pudo guardar: ${updateError.message}.${hint}`);
+        setIssueDialogError(`No se pudo guardar: ${updateError.message}`);
         return;
       }
       if (!updatedRow) {
-        setIssueDialogError(
-          "No se actualizó ningún pedido. Probá refrescar la página. Si sigue igual, comprobá en Supabase que existan las columnas delivery_issue_* (mismo SQL de despacho)."
-        );
+        setIssueDialogError("No se pudo actualizar. Refrescá la página e intentá de nuevo.");
         return;
       }
       setOrders((prev) => prev.map((row) => (row.id === order.id ? { ...row, ...updatedRow } : row)));
@@ -586,9 +579,7 @@ export default function DeliveryApp({ onLogout }) {
         <div className="max-w-md rounded-2xl border border-slate-800 bg-slate-900/90 p-8 shadow-xl">
           <h2 className="text-lg font-semibold text-slate-100">Hoy no tenés turno en reparto</h2>
           <p className="mt-3 text-sm leading-relaxed text-slate-400">
-            Tu cuenta solo puede usarse los días que configuró el administrador en{" "}
-            <span className="text-slate-300">Admin → Usuarios</span>. Si necesitás cambiar los días,
-            pedilo ahí.
+            Contactá a quien administra el sistema para habilitar tus días de trabajo.
           </p>
           <button
             type="button"
@@ -612,19 +603,13 @@ export default function DeliveryApp({ onLogout }) {
           <div>
             <h1 className="text-2xl font-bold">Repartos</h1>
             <p className="text-xs text-slate-400">
-              {restaurantName ? `${restaurantName} · ` : ""}
-              {partitioned.legacyEnv ? (
+              {restaurantName ? restaurantName : ""}
+              {!partitioned.legacyEnv && getSession()?.username ? (
                 <>
-                  Contraseña del .env: solo ves pedidos confirmados. Para reparto en equipo, entrá con usuario y clave
-                  (Admin → Usuarios).
+                  {restaurantName ? " · " : ""}
+                  <span className="text-slate-300">{getSession()?.username || ""}</span>
                 </>
-              ) : (
-                <>
-                  <span className="text-slate-300">{getSession()?.username || "repartidor"}</span>
-                  {" · "}
-                  Cola compartida: tomá uno disponible o seguí los que ya te asignaste.
-                </>
-              )}
+              ) : null}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -846,12 +831,6 @@ function DeliveryOrderCard({
 
   return (
     <article className="rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-lg shadow-black/20">
-      {variant === "pool" ? (
-        <p className="mb-3 rounded-lg border border-cyan-500/35 bg-cyan-500/10 px-3 py-2 text-[11px] leading-snug text-cyan-100/95">
-          Pedido listo en cocina: está en la cola. Solo un repartidor puede tomarlo; al hacerlo desaparece para el
-          resto.
-        </p>
-      ) : null}
       <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="text-[11px] uppercase tracking-wider text-slate-500">Pedido</p>
@@ -1016,16 +995,6 @@ function DeliveryOrderCard({
           )}
         </div>
       </div>
-
-      {variant === "pool" ? (
-        <p className="mt-2 text-[11px] text-cyan-200/75">
-          Estado: {status}. Después de tomarlo vas a poder marcar la entrega como ahora.
-        </p>
-      ) : ["confirmed", "pending", "delivery_fee_set"].includes(status) ? null : (
-        <p className="mt-2 text-[11px] text-amber-300/80">
-          Estado actual: {status}. Si no debiera estar acá, avisá al admin.
-        </p>
-      )}
     </article>
   );
 }

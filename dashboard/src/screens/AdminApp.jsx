@@ -85,9 +85,8 @@ export default function AdminApp({ onLogout }) {
     dateTo: "",
     search: ""
   });
-  /** Por defecto solo pedidos del día local (sin borrar la DB). Desmarcá para ver histórico o rangos. */
+
   const [ordersTodayOnly, setOrdersTodayOnly] = useState(true);
-  /** Banner de eventos realtime fuera del rango paginado. */
   const [hiddenUpdatesCount, setHiddenUpdatesCount] = useState(0);
   const [menuItems, setMenuItems] = useState([]);
   const [restaurantId, setRestaurantId] = useState("");
@@ -710,7 +709,7 @@ export default function AdminApp({ onLogout }) {
         ? st === "delivered"
           ? "El pedido ya figura entregado. Solo se oculta el aviso rojo; el texto de la incidencia queda en el pedido."
           : "El pedido ya figura cancelado. Solo se oculta el aviso rojo; la incidencia sigue en el historial."
-        : "Se cancela el pedido por la incidencia que reportó el repartidor. Este botón cierra la alerta y deja registro de cierre (distinto del «Cancelar» general). Si hubo pago con Mercado Pago, el reembolso se gestiona aparte.",
+        : "Se cancela el pedido por la incidencia reportada. Si hubo pago con Mercado Pago, el reembolso se gestiona aparte.",
       confirmLabel: closeOnly ? "Cerrar aviso" : "Sí, cancelar por incidencia",
       cancelLabel: "Volver",
       tone: "danger"
@@ -1097,9 +1096,7 @@ export default function AdminApp({ onLogout }) {
         return;
       }
       if (!data) {
-        setError(
-          "No se encontro el restaurante para este dashboard. Configura DASHBOARD_BOT_WHATSAPP_NUMBER en el .env principal."
-        );
+        setError("No se encontró el restaurante para este panel.");
         return;
       }
 
@@ -1681,9 +1678,7 @@ export default function AdminApp({ onLogout }) {
                           </p>
                         ) : (
                           <p className="mt-1 text-xs leading-relaxed text-slate-400">
-                            Nadie tomó este pedido desde el panel de repartidores (sin usuario asignado). Si ya se
-                            entregó o canceló por otro circuito, puede ser pedido previo al reparto con toma o la toma
-                            no quedó registrada.
+                            Sin repartidor asignado.
                           </p>
                         )}
                         {order.delivery_en_route_customer_notified_at &&
@@ -1974,7 +1969,7 @@ export default function AdminApp({ onLogout }) {
                                   disabled={savingOrderId === order.id}
                                   onClick={() => notifyDeliveriesOrderReady(order)}
                                   className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs text-amber-300"
-                                  title="Avisá a los repartidores que el pedido está listo para salir; uno lo tomará desde su panel"
+                                  title="Pedido listo para reparto"
                                 >
                                   Avisar repartidores: pedido listo
                                 </button>
@@ -2016,7 +2011,7 @@ export default function AdminApp({ onLogout }) {
                                   disabled={savingOrderId === order.id}
                                   onClick={() => requestPickupReadyNotify(order)}
                                   className="rounded-lg border border-violet-500/40 bg-violet-500/10 px-3 py-1 text-xs text-violet-200"
-                                  title="El bot envía un WhatsApp al cliente para que pase a retirar"
+                                  title="Avisar retiro listo al cliente"
                                 >
                                   Avisar: listo para retiro
                                 </button>
@@ -2036,13 +2031,7 @@ export default function AdminApp({ onLogout }) {
                                     : ""}
                                 </span>
                               ) : null}
-                              {isDeliveryOrder(order) ? (
-                                <div className="rounded-lg border border-slate-600/40 bg-slate-800/40 px-3 py-2 text-[11px] leading-snug text-slate-400">
-                                  <span className="font-medium text-slate-300">Delivery:</span> cuando la cocina termine,
-                                  usá &quot;Avisar repartidores: pedido listo&quot;. Los repartidores comparten la cola: uno
-                                  toma el pedido y lo entrega (cobro efectivo se registra al entregar).
-                                </div>
-                              ) : (
+                              {isDeliveryOrder(order) ? null : (
                                 <button
                                   type="button"
                                   disabled={savingOrderId === order.id}
@@ -2292,9 +2281,7 @@ export default function AdminApp({ onLogout }) {
                 Configuración del restaurante
               </h2>
               <p className="text-xs text-slate-400">
-                Estos datos los usa el bot para responder por WhatsApp (horario, ubicación,
-                zonas de delivery, políticas). El cambio aplica al próximo mensaje; el caché
-                interno de IA refresca a los 5 minutos.
+                Horario, ubicación, zonas de delivery y políticas que usa el canal de WhatsApp del negocio.
               </p>
             </div>
 
@@ -2309,7 +2296,7 @@ export default function AdminApp({ onLogout }) {
               >
                 <div className="grid gap-4 md:grid-cols-2">
                   <label className="space-y-1 text-sm">
-                    <span className="text-slate-300">Nombre interno (DB)</span>
+                    <span className="text-slate-300">Nombre interno</span>
                     <input
                       value={restaurantConfig.name}
                       onChange={(event) =>
@@ -2318,10 +2305,7 @@ export default function AdminApp({ onLogout }) {
                       placeholder="Ej: Bar del Sur"
                       className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"
                     />
-                    <span className="block text-xs text-slate-500">
-                      Identificador interno. No se muestra al cliente salvo que no haya
-                      "Marca pública".
-                    </span>
+                    <span className="block text-xs text-slate-500">Uso interno; si no hay marca pública, se muestra este.</span>
                   </label>
                   <label className="space-y-1 text-sm">
                     <span className="text-slate-300">Marca pública (lo que ve el cliente)</span>
@@ -2519,9 +2503,6 @@ function OrdersFilterBar({ filters, todayOnly, onApply, onReset, total, shown })
           />
           <span>
             <span className="font-medium text-emerald-300">Solo pedidos de hoy</span>
-            <span className="mt-0.5 block text-xs font-normal text-slate-500">
-              Lista corta cada día; los datos históricos siguen en Supabase. Desmarcá para elegir fechas o ver todo.
-            </span>
           </span>
         </label>
         {draftTodayOnly ? (

@@ -71,7 +71,7 @@ export default function DashboardUsersPanel() {
     if (qErr) {
       setError(
         qErr.message.includes("does not exist") || qErr.code === "42P01"
-          ? "La tabla dashboard_users no existe. Ejecutá el SQL en dashboard/sql/dashboard_users.sql en Supabase."
+          ? "No se pudo cargar la lista de usuarios. Contactá al administrador."
           : `Error cargando usuarios: ${qErr.message}`
       );
       setRows([]);
@@ -218,11 +218,7 @@ export default function DashboardUsersPanel() {
       <div className="rounded-xl border border-slate-700 bg-slate-900 p-5">
         <h2 className="text-sm font-semibold text-slate-200">Usuarios del dashboard</h2>
         <p className="mt-1 text-xs text-slate-400">
-          Cuentas para entrar con <span className="text-slate-300">usuario + contraseña</span> (admin o
-          delivery). Para <span className="text-slate-300">reparto</span>, marcá en qué días puede
-          iniciar sesión cada persona; fuera de esos días no podrá entrar al panel de delivery. Las
-          contraseñas del <code className="rounded bg-slate-800 px-1">.env</code> siguen valiendo sin
-          usuario en el login.
+          Altas de cuentas para admin o reparto. Para reparto, elegí los días en que puede iniciar sesión cada usuario.
         </p>
       </div>
 

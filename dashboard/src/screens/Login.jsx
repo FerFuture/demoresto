@@ -95,11 +95,6 @@ export default function Login({ onLoggedIn }) {
                 );
               })}
             </div>
-            {!useEnvLogin ? (
-              <p className="mt-1.5 text-[11px] text-slate-500">
-                Con usuario, el rol no se elige aquí: viene de la base de datos.
-              </p>
-            ) : null}
           </div>
 
           <div className="mb-4">
@@ -136,12 +131,6 @@ export default function Login({ onLoggedIn }) {
             {submitting ? "Ingresando…" : "Ingresar"}
           </button>
         </form>
-        <p className="mt-6 text-center text-[11px] leading-relaxed text-slate-500">
-          No hace falta una URL distinta por repartidor: cada uno entra con su usuario. Para abrir{" "}
-          <span className="text-slate-400">dos repartidores a la vez</span> usá otro navegador o una ventana de
-          incógnito (la sesión se guarda por navegador, no por pestaña). Enlaces directos:{" "}
-          <span className="text-slate-400">/delivery</span> y <span className="text-slate-400">/admin</span>.
-        </p>
       </div>
     </div>
   );
