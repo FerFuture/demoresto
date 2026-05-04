@@ -427,7 +427,6 @@ function buildDeliveryEnRouteCustomerBody(restaurantName, orderId) {
   return [
     `*Tu pedido ya salió*${ref}`,
     `El repartidor de *${brand}* va en camino a tu domicilio.`,
-    "Si no podés recibirlo, avisános respondiendo por este chat.",
     "¡Gracias por tu pedido!"
   ].join("\n");
 }

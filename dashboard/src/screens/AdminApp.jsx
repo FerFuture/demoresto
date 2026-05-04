@@ -21,6 +21,7 @@ import {
 } from "../lib/format";
 import AdminStats from "./AdminStats";
 import DashboardUsersPanel from "./DashboardUsersPanel";
+import OrdersDateRangeCalendar from "../components/OrdersDateRangeCalendar";
 
 /** Fecha local yyyy-mm-dd (zona horaria del navegador). */
 function localDateKey(d = new Date()) {
@@ -2579,33 +2580,7 @@ function OrdersFilterBar({ filters, todayOnly, onApply, onReset, total, shown })
           ))}
         </select>
       </label>
-      <label className="space-y-1 text-xs">
-        <span className="text-slate-400">Desde</span>
-        <input
-          type="date"
-          disabled={draftTodayOnly}
-          value={draft.dateFrom}
-          onChange={(event) => {
-            update("dateFrom", event.target.value);
-            setDraftTodayOnly(false);
-          }}
-          className="h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
-        />
-      </label>
-      <label className="space-y-1 text-xs">
-        <span className="text-slate-400">Hasta</span>
-        <input
-          type="date"
-          disabled={draftTodayOnly}
-          value={draft.dateTo}
-          onChange={(event) => {
-            update("dateTo", event.target.value);
-            setDraftTodayOnly(false);
-          }}
-          className="h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
-        />
-      </label>
-      <label className="space-y-1 text-xs">
+      <label className="space-y-1 text-xs md:col-span-3">
         <span className="text-slate-400">Buscar (cliente / dirección / notas)</span>
         <input
           type="text"
@@ -2615,6 +2590,18 @@ function OrdersFilterBar({ filters, todayOnly, onApply, onReset, total, shown })
           className="h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100"
         />
       </label>
+      {!draftTodayOnly ? (
+        <div className="md:col-span-6">
+          <OrdersDateRangeCalendar
+            dateFrom={draft.dateFrom}
+            dateTo={draft.dateTo}
+            onRangeChange={(from, to) => {
+              setDraftTodayOnly(false);
+              setDraft((prev) => ({ ...prev, dateFrom: from, dateTo: to }));
+            }}
+          />
+        </div>
+      ) : null}
       <div className="md:col-span-6 flex flex-wrap items-center justify-between gap-2 pt-1">
         <span className="text-xs text-slate-500">
           {shown} de {total} resultados con los filtros actuales

@@ -1250,7 +1250,23 @@ const QTY_FILLER_TOKENS = new Set([
   "y",
   "con",
   "entonces",
-  "dale"
+  "dale",
+  /** Entre cantidad y nombre del producto ("3 combos de pizza con gaseosa"). */
+  "combo",
+  "combos",
+  "menu",
+  "pack",
+  "packs",
+  "paquete",
+  "paquetes",
+  "plato",
+  "platos",
+  "porcion",
+  "porciones",
+  "unidad",
+  "unidades",
+  "uds",
+  "ud"
 ]);
 
 function extractQuantityBeforePosition(normalizedText, position) {
