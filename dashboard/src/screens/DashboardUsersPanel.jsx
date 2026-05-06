@@ -217,7 +217,8 @@ export default function DashboardUsersPanel() {
       <div className="rounded-xl border border-slate-700 bg-slate-900 p-5">
         <h2 className="text-sm font-semibold text-slate-200">Usuarios del panel</h2>
         <p className="mt-1 text-xs text-slate-400">
-          Altas de cuentas para admin o reparto. Para reparto, elegí los días en que puede iniciar sesión cada usuario.
+          Altas para admin, cocina, mozo o reparto. Para reparto, elegí los días en que puede iniciar sesión cada
+          usuario.
         </p>
       </div>
 
@@ -263,6 +264,8 @@ export default function DashboardUsersPanel() {
             className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"
           >
             <option value="admin">{ROLE_LABELS.admin}</option>
+            <option value="kitchen">{ROLE_LABELS.kitchen}</option>
+            <option value="waiter">{ROLE_LABELS.waiter}</option>
             <option value="delivery">{ROLE_LABELS.delivery}</option>
           </select>
         </label>
@@ -363,6 +366,8 @@ function UserRowCard({ row, saving, onSave, onToggleActive, onDelete }) {
               className="h-9 w-full max-w-xs rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm"
             >
               <option value="admin">{ROLE_LABELS.admin}</option>
+              <option value="kitchen">{ROLE_LABELS.kitchen}</option>
+              <option value="waiter">{ROLE_LABELS.waiter}</option>
               <option value="delivery">{ROLE_LABELS.delivery}</option>
             </select>
           </label>

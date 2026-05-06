@@ -41,6 +41,40 @@ export function normalizeOrderStatus(order) {
   return String(order?.status ?? "").trim();
 }
 
+/** Pedido cargado desde el panel Mozo (no desde WhatsApp del cliente). */
+export function orderPlacedByWaiter(order) {
+  const notes = String(order?.notes || "");
+  if (/Origen:\s*mozo\b/i.test(notes)) return true;
+  if (/^Mozo\s*·\s*Mesa:/i.test(notes.trim())) return true;
+  const pm = String(order?.payment_method ?? "").toLowerCase();
+  if (pm.includes("efectivo_mesa")) return true;
+  return false;
+}
+
+/** Solo UI (dashboard): estado del pedido en español; la BD no cambia. */
+export function formatOrderStatusLabelEs(orderOrStatus) {
+  const st =
+    typeof orderOrStatus === "string"
+      ? String(orderOrStatus).trim()
+      : normalizeOrderStatus(orderOrStatus);
+  const key = st || "pending";
+  return ORDER_STATUS_LABELS[key] ?? key;
+}
+
+const PAYMENT_STATUS_LABELS_ES = {
+  pending: "Pendiente",
+  approved: "Aprobado",
+  paid: "Pagado",
+  cancelled: "Cancelado"
+};
+
+/** Solo UI (dashboard): estado de pago en español; la BD no cambia. */
+export function formatPaymentStatusLabelEs(value) {
+  const key = String(value ?? "").trim().toLowerCase();
+  if (!key) return "—";
+  return PAYMENT_STATUS_LABELS_ES[key] ?? String(value).trim();
+}
+
 export function fulfillmentIsDelivery(order) {
   const ft = String(order?.fulfillment_type ?? "").trim().toLowerCase();
   return ft === "delivery";
@@ -52,6 +86,7 @@ export function fulfillmentIsPickup(order) {
 }
 
 export function notesIndicateCustomerConfirmedDeliveryTotal(order) {
+  if (order?.delivery_total_confirmed_at) return true;
   const n = String(order?.notes ?? "").toLowerCase();
   return (
     n.includes("cliente confirmó el total con envío") ||
@@ -82,7 +117,7 @@ export function adminCanNotifyDeliveriesReady(order) {
     if (st === "awaiting_delivery_total_confirm") return false;
     if (deliveryFeeStillUnset(order)) return false;
     if (!notesIndicateCustomerConfirmedDeliveryTotal(order)) return false;
-    return st === "pending" || st === "delivery_fee_set";
+    return st === "pending" || st === "confirmed" || st === "delivery_fee_set";
   }
 
   if (approved) {
@@ -248,6 +283,29 @@ export function groupOrderItemRows(order) {
   return ord.map((name) => ({ name, count: counts.get(name) }));
 }
 
+/** Pedido en cola de cocina: confirmado, aún sin marcar listo. */
+export function orderInKitchenQueue(order) {
+  const st = normalizeOrderStatus(order);
+  if (st === "delivered" || st === "cancelled") return false;
+  if (st !== "confirmed") return false;
+  if (order?.kitchen_ready_at) return false;
+  return true;
+}
+
+/** Cocina ya marcó listo (listo para entregar / avisar). */
+export function orderKitchenReady(order) {
+  return Boolean(order?.kitchen_ready_at);
+}
+
+/** Mesa: columna table_number o texto en notas "Mesa: N". */
+export function tableNumberLabel(order) {
+  const n = order?.table_number;
+  if (n != null && n !== "" && Number.isFinite(Number(n))) return String(Number(n));
+  const notes = String(order?.notes || "");
+  const m = notes.match(/Mesa:\s*(\d+)/i);
+  return m ? m[1] : "";
+}
+
 export function formatOrderNotesForDisplay(rawNotes) {
   const s = String(rawNotes || "").trim();
   if (!s) return "";
@@ -266,4 +324,67 @@ export function formatOrderNotesForDisplay(rawNotes) {
     }
   }
   return out.join(" | ");
+}
+
+/** Método de pago legible para cocina (pedidos del cliente). */
+export function kitchenPaymentMethodLabelEs(order) {
+  const key = paymentMethodKey(order);
+  if (key === "mp") return "Mercado Pago";
+  if (key === "cash") return "Efectivo al recibir";
+  const raw = String(order?.payment_method ?? "").trim();
+  return raw || "—";
+}
+
+/**
+ * Texto del recuadro informativo en cocina: sin detalle de ítems ni confirmaciones de WhatsApp.
+ * Mozo: notas operativas (sin prefijo "Origen"). Cliente delivery: dirección + pago. Cliente local: teléfono + retiro.
+ */
+export function kitchenMetaBoxContent(order) {
+  if (orderPlacedByWaiter(order)) {
+    let raw = String(order?.notes || "").trim();
+    if (!raw) return "";
+    raw = raw.replace(/^Origen:\s*mozo\s*\|\s*/i, "").replace(/^Origen:\s*mozo\b\s*/i, "");
+    const formatted = formatOrderNotesForDisplay(raw);
+    return formatted || raw;
+  }
+  if (isDeliveryOrder(order)) {
+    const addr = String(order?.address ?? "").trim();
+    const pay = kitchenPaymentMethodLabelEs(order);
+    return `Dirección: ${addr || "—"} | Pago: ${pay}`;
+  }
+  const digits = callableCustomerPhone(order);
+  const phone = digits ? formatPhoneLabel(digits) : "—";
+  return `Teléfono: ${phone} | Retiro en local`;
+}
+
+/**
+ * Bloque "Notas" del admin: ítems // confirmación por WhatsApp del total delivery (si aplica).
+ * Dirección, pago y demás datos operativos no van aquí (figuran en el resto del panel).
+ */
+export function adminDashboardNotesBlock(order) {
+  const chunks = [];
+
+  const itemsLine = formatGroupedItemLine(flattenOrderItems(order));
+  if (itemsLine) {
+    chunks.push(`Items: ${itemsLine}`);
+  }
+
+  if (order?.delivery_total_confirmed_at) {
+    const dt = formatDateTime(order.delivery_total_confirmed_at);
+    chunks.push(
+      dt
+        ? `Cliente confirmó el total con envío (WhatsApp) · ${dt}`
+        : "Cliente confirmó el total con envío (WhatsApp)."
+    );
+  } else if (notesIndicateCustomerConfirmedDeliveryTotal(order)) {
+    chunks.push("Cliente confirmó el total con envío (WhatsApp).");
+  }
+
+  const joined = chunks.filter(Boolean).join(" // ");
+  if (joined) return joined;
+  return (
+    formatOrderNotesForDisplay(order?.notes) ||
+    String(order?.raw_request || "").trim() ||
+    ""
+  );
 }

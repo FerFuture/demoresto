@@ -4,20 +4,25 @@ import {
   ORDER_STATUS_COLORS,
   callableCustomerPhone,
   currency,
+  formatOrderStatusLabelEs,
+  formatPaymentStatusLabelEs,
   formatPhoneLabel,
   fulfillmentIsDelivery,
   fulfillmentIsPickup,
+  adminDashboardNotesBlock,
   isDeliveryOrder,
   normalizeOrderStatus,
   notesIndicateDelivery,
   orderNeedsDeliveryFeeControls,
   adminShowNotifyDeliveriesReadyButton,
+  orderInKitchenQueue,
+  orderKitchenReady,
   paymentIsApproved,
   paymentMethodKey,
   playNotification,
   subtotalForOrder,
   formatDateTime as formatPaidAt,
-  formatOrderNotesForDisplay
+  tableNumberLabel
 } from "../lib/format";
 import AdminStats from "./AdminStats";
 import DashboardUsersPanel from "./DashboardUsersPanel";
@@ -229,7 +234,10 @@ export default function AdminApp({ onLogout }) {
         const haystack = [
           String(order.customer_number || ""),
           String(order.address || ""),
-          String(order.notes || "")
+          String(order.notes || ""),
+          order.table_number != null && order.table_number !== ""
+            ? String(order.table_number)
+            : ""
         ]
           .join(" ")
           .toLowerCase();
@@ -1499,14 +1507,33 @@ export default function AdminApp({ onLogout }) {
                   ) : null}
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <h2 className="text-sm font-semibold text-slate-200">Pedido #{order.id.slice(0, 8)}</h2>
-                    <span
-                      className={`rounded-full px-3 py-1 text-xs font-medium ${
-                        ORDER_STATUS_COLORS[normalizeOrderStatus(order) || "pending"] ||
-                        "bg-slate-700 text-slate-200"
-                      }`}
-                    >
-                      {normalizeOrderStatus(order) || "pending"}
-                    </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {tableNumberLabel(order) ? (
+                        <span className="rounded-full bg-violet-500/25 px-2.5 py-1 text-xs font-semibold text-violet-200">
+                          Mesa {tableNumberLabel(order)}
+                        </span>
+                      ) : null}
+                      {orderKitchenReady(order) ? (
+                        <span className="rounded-full border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-xs font-medium text-emerald-200">
+                          Listo cocina
+                          {formatPaidAt(order.kitchen_ready_at)
+                            ? ` · ${formatPaidAt(order.kitchen_ready_at)}`
+                            : ""}
+                        </span>
+                      ) : orderInKitchenQueue(order) ? (
+                        <span className="rounded-full border border-amber-500/35 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-200">
+                          En cocina
+                        </span>
+                      ) : null}
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-medium ${
+                          ORDER_STATUS_COLORS[normalizeOrderStatus(order) || "pending"] ||
+                          "bg-slate-700 text-slate-200"
+                        }`}
+                      >
+                        {formatOrderStatusLabelEs(order)}
+                      </span>
+                    </div>
                   </div>
                   <div className="grid gap-2 text-sm text-slate-300 md:grid-cols-2">
                     <div>
@@ -1535,7 +1562,8 @@ export default function AdminApp({ onLogout }) {
                         : order.fulfillment_type || (order.address ? "delivery" : "-")}
                     </p>
                     <p>
-                      <span className="text-slate-500">Estado pago:</span> {order.payment_status || "-"}
+                      <span className="text-slate-500">Estado pago:</span>{" "}
+                      {formatPaymentStatusLabelEs(order.payment_status)}
                     </p>
                     <p>
                       <span className="text-slate-500">Subtotal productos:</span>{" "}
@@ -1585,7 +1613,7 @@ export default function AdminApp({ onLogout }) {
                     </p>
                     <p className="md:col-span-2">
                       <span className="text-slate-500">Notas:</span>{" "}
-                      {formatOrderNotesForDisplay(order.notes) || order.raw_request || "-"}
+                      {adminDashboardNotesBlock(order) || "-"}
                     </p>
                     {shouldShowDeliveryRepartoSection(order) ? (
                       <div
@@ -1672,9 +1700,7 @@ export default function AdminApp({ onLogout }) {
                       <div className="md:col-span-2 space-y-3 rounded-lg border border-orange-500/35 bg-orange-950/20 p-4">
                         <p className="text-sm font-semibold text-orange-200">Esperando costo de envío</p>
                         <p className="text-xs text-slate-400">
-                          Ingresá el envío en ARS (debe ser mayor a 0). Se calcula el total y se avisa al cliente por
-                          el canal de mensajes. Si no llegamos a esa zona, usá &quot;Negar delivery&quot; y el
-                          motivo.
+                          Si no llegamos a esa zona, usá &quot;Negar delivery&quot; y el motivo.
                           {normalizeOrderStatus(order) === "pending" ? (
                             <span className="block pt-1 text-orange-200/90">
                               (Pedido en estado &quot;pending&quot; pero detectado como delivery: confirmá envío o
@@ -2384,6 +2410,7 @@ export default function AdminApp({ onLogout }) {
 }
 
 function OrdersFilterBar({ filters, todayOnly, onApply, onReset, total, shown }) {
+  const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState(filters);
   const [draftTodayOnly, setDraftTodayOnly] = useState(todayOnly);
 
@@ -2433,129 +2460,193 @@ function OrdersFilterBar({ filters, todayOnly, onApply, onReset, total, shown })
     { value: "local", label: "Retiro en local" }
   ];
 
+  const appliedSummaryParts = [];
+  if (todayOnly) {
+    appliedSummaryParts.push("Solo hoy");
+  } else if (filters.dateFrom && filters.dateTo) {
+    appliedSummaryParts.push(`${filters.dateFrom} → ${filters.dateTo}`);
+  } else if (filters.dateFrom || filters.dateTo) {
+    appliedSummaryParts.push("Rango de fechas");
+  }
+  if (filters.status !== "all") {
+    appliedSummaryParts.push(STATUS_OPTIONS.find((o) => o.value === filters.status)?.label ?? filters.status);
+  }
+  if (filters.paymentMethod !== "all") {
+    appliedSummaryParts.push(
+      PAYMENT_OPTIONS.find((o) => o.value === filters.paymentMethod)?.label ?? filters.paymentMethod
+    );
+  }
+  if (filters.fulfillmentType !== "all") {
+    appliedSummaryParts.push(
+      FULFILLMENT_OPTIONS.find((o) => o.value === filters.fulfillmentType)?.label ?? filters.fulfillmentType
+    );
+  }
+  const searchTrim = String(filters.search || "").trim();
+  if (searchTrim) {
+    appliedSummaryParts.push(
+      searchTrim.length > 28 ? `Buscar: "${searchTrim.slice(0, 28)}…"` : `Buscar: "${searchTrim}"`
+    );
+  }
+  const appliedSummary =
+    appliedSummaryParts.length > 0 ? appliedSummaryParts.join(" · ") : "Filtros por defecto";
+
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="grid gap-3 rounded-xl border border-slate-700 bg-slate-900 p-4 md:grid-cols-6"
-    >
-      <div className="md:col-span-6 flex flex-col gap-2 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
-        <label className="flex cursor-pointer items-start gap-3 text-sm text-slate-200">
-          <input
-            type="checkbox"
-            checked={draftTodayOnly}
-            onChange={(event) => {
-              const checked = event.target.checked;
-              setDraftTodayOnly(checked);
-              if (checked) {
-                const t = localDateKey();
-                setDraft((prev) => ({ ...prev, dateFrom: t, dateTo: t }));
-              }
-            }}
-            className="mt-1 rounded border-slate-600 bg-slate-950"
+    <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-900">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((prev) => !prev)}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-800/60"
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden="true"
+          className={`h-5 w-5 shrink-0 text-slate-400 transition-transform ${expanded ? "rotate-0" : "-rotate-90"}`}
+        >
+          <path
+            fillRule="evenodd"
+            d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.94a.75.75 0 111.08 1.04l-4.24 4.5a.75.75 0 01-1.08 0l-4.24-4.5a.75.75 0 01.02-1.06z"
+            clipRule="evenodd"
           />
-          <span>
-            <span className="font-medium text-emerald-300">Solo pedidos de hoy</span>
-          </span>
-        </label>
-        {draftTodayOnly ? (
-          <p className="text-xs text-slate-400">
-            Mostrando{" "}
-            <span className="font-medium text-slate-200">
-              {new Date(`${localDateKey()}T12:00:00`).toLocaleDateString("es-AR", {
-                weekday: "long",
-                day: "numeric",
-                month: "long",
-                year: "numeric"
-              })}
-            </span>
-          </p>
-        ) : null}
-      </div>
-      <label className="space-y-1 text-xs">
-        <span className="text-slate-400">Estado</span>
-        <select
-          value={draft.status}
-          onChange={(event) => update("status", event.target.value)}
-          className="h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100"
-        >
-          {STATUS_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="space-y-1 text-xs">
-        <span className="text-slate-400">Pago</span>
-        <select
-          value={draft.paymentMethod}
-          onChange={(event) => update("paymentMethod", event.target.value)}
-          className="h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100"
-        >
-          {PAYMENT_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="space-y-1 text-xs">
-        <span className="text-slate-400">Modalidad</span>
-        <select
-          value={draft.fulfillmentType}
-          onChange={(event) => update("fulfillmentType", event.target.value)}
-          className="h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100"
-        >
-          {FULFILLMENT_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="space-y-1 text-xs md:col-span-3">
-        <span className="text-slate-400">Buscar (cliente / dirección / notas)</span>
-        <input
-          type="text"
-          value={draft.search}
-          onChange={(event) => update("search", event.target.value)}
-          placeholder="Ej: 5491156... o calle"
-          className="h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100"
-        />
-      </label>
-      {!draftTodayOnly ? (
-        <div className="md:col-span-6">
-          <OrdersDateRangeCalendar
-            dateFrom={draft.dateFrom}
-            dateTo={draft.dateTo}
-            onRangeChange={(from, to) => {
-              setDraftTodayOnly(false);
-              setDraft((prev) => ({ ...prev, dateFrom: from, dateTo: to }));
-            }}
-          />
+        </svg>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-slate-100">Filtros de pedidos</div>
+          {!expanded ? (
+            <div className="mt-0.5 truncate text-xs text-slate-400">{appliedSummary}</div>
+          ) : null}
         </div>
-      ) : null}
-      <div className="md:col-span-6 flex flex-wrap items-center justify-between gap-2 pt-1">
-        <span className="text-xs text-slate-500">
-          {shown} de {total} resultados con los filtros actuales
+        <span className="shrink-0 tabular-nums text-xs text-slate-500">
+          {shown} / {total}
         </span>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={onReset}
-            className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
-          >
-            Limpiar
-          </button>
-          <button
-            type="submit"
-            className="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950"
-          >
-            Aplicar filtros
-          </button>
-        </div>
-      </div>
-    </form>
+      </button>
+
+      {expanded ? (
+        <form
+          onSubmit={handleSubmit}
+          className="grid gap-3 border-t border-slate-700 p-4 md:grid-cols-6"
+        >
+          <div className="md:col-span-6 flex flex-col gap-2 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+            <label className="flex cursor-pointer items-start gap-3 text-sm text-slate-200">
+              <input
+                type="checkbox"
+                checked={draftTodayOnly}
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  setDraftTodayOnly(checked);
+                  if (checked) {
+                    const t = localDateKey();
+                    setDraft((prev) => ({ ...prev, dateFrom: t, dateTo: t }));
+                  }
+                }}
+                className="mt-1 rounded border-slate-600 bg-slate-950"
+              />
+              <span>
+                <span className="font-medium text-emerald-300">Solo pedidos de hoy</span>
+              </span>
+            </label>
+            {draftTodayOnly ? (
+              <p className="text-xs text-slate-400">
+                Mostrando{" "}
+                <span className="font-medium text-slate-200">
+                  {new Date(`${localDateKey()}T12:00:00`).toLocaleDateString("es-AR", {
+                    weekday: "long",
+                    day: "numeric",
+                    month: "long",
+                    year: "numeric"
+                  })}
+                </span>
+              </p>
+            ) : null}
+          </div>
+          <label className="space-y-1 text-xs">
+            <span className="text-slate-400">Estado</span>
+            <select
+              value={draft.status}
+              onChange={(event) => update("status", event.target.value)}
+              className="h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100"
+            >
+              {STATUS_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="space-y-1 text-xs">
+            <span className="text-slate-400">Pago</span>
+            <select
+              value={draft.paymentMethod}
+              onChange={(event) => update("paymentMethod", event.target.value)}
+              className="h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100"
+            >
+              {PAYMENT_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="space-y-1 text-xs">
+            <span className="text-slate-400">Modalidad</span>
+            <select
+              value={draft.fulfillmentType}
+              onChange={(event) => update("fulfillmentType", event.target.value)}
+              className="h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100"
+            >
+              {FULFILLMENT_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="space-y-1 text-xs md:col-span-3">
+            <span className="text-slate-400">Buscar (cliente / dirección / notas)</span>
+            <input
+              type="text"
+              value={draft.search}
+              onChange={(event) => update("search", event.target.value)}
+              placeholder="Ej: 5491156... o calle"
+              className="h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100"
+            />
+          </label>
+          {!draftTodayOnly ? (
+            <div className="md:col-span-6">
+              <OrdersDateRangeCalendar
+                dateFrom={draft.dateFrom}
+                dateTo={draft.dateTo}
+                onRangeChange={(from, to) => {
+                  setDraftTodayOnly(false);
+                  setDraft((prev) => ({ ...prev, dateFrom: from, dateTo: to }));
+                }}
+              />
+            </div>
+          ) : null}
+          <div className="md:col-span-6 flex flex-wrap items-center justify-between gap-2 pt-1">
+            <span className="text-xs text-slate-500">
+              {shown} de {total} resultados con los filtros actuales
+            </span>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={onReset}
+                className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+              >
+                Limpiar
+              </button>
+              <button
+                type="submit"
+                className="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950"
+              >
+                Aplicar filtros
+              </button>
+            </div>
+          </div>
+        </form>
+      ) : null}
+    </div>
   );
 }
 

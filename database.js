@@ -205,6 +205,9 @@ async function saveOrder(payload) {
   if (payload.customerPhone) {
     row.customer_phone = sanitizeWhatsAppId(payload.customerPhone) || null;
   }
+  if (payload.deliveryTotalConfirmedAt != null) {
+    row.delivery_total_confirmed_at = payload.deliveryTotalConfirmedAt;
+  }
 
   let { data, error } = await supabase.from(TABLES.orders).insert(row).select("*").single();
   // Si la migracion `customer_phone` todavia no se aplicó en la DB, Postgres
@@ -213,6 +216,13 @@ async function saveOrder(payload) {
   if (error && /customer_phone/i.test(error.message || "") && "customer_phone" in row) {
     const fallbackRow = { ...row };
     delete fallbackRow.customer_phone;
+    const retry = await supabase.from(TABLES.orders).insert(fallbackRow).select("*").single();
+    data = retry.data;
+    error = retry.error;
+  }
+  if (error && /delivery_total_confirmed_at/i.test(error.message || "") && "delivery_total_confirmed_at" in row) {
+    const fallbackRow = { ...row };
+    delete fallbackRow.delivery_total_confirmed_at;
     const retry = await supabase.from(TABLES.orders).insert(fallbackRow).select("*").single();
     data = retry.data;
     error = retry.error;

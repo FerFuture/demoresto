@@ -7,11 +7,13 @@ import {
 
 const SESSION_KEY = "restobot_session_v1";
 
-export const ROLES = ["admin", "delivery"];
+export const ROLES = ["admin", "delivery", "kitchen", "waiter"];
 
 export const ROLE_LABELS = {
   admin: "Restaurante (admin)",
-  delivery: "Repartidor (delivery)"
+  delivery: "Repartidor (delivery)",
+  kitchen: "Cocina",
+  waiter: "Mozo"
 };
 
 const DASHBOARD_USERS_TABLE = "dashboard_users";
@@ -19,7 +21,9 @@ const DASHBOARD_USERS_TABLE = "dashboard_users";
 function envPasswords() {
   return {
     admin: String(import.meta.env.VITE_ADMIN_PASSWORD || "").trim(),
-    delivery: String(import.meta.env.VITE_DELIVERY_PASSWORD || "").trim()
+    delivery: String(import.meta.env.VITE_DELIVERY_PASSWORD || "").trim(),
+    kitchen: String(import.meta.env.VITE_KITCHEN_PASSWORD || "").trim(),
+    waiter: String(import.meta.env.VITE_WAITER_PASSWORD || "").trim()
   };
 }
 

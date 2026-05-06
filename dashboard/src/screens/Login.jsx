@@ -70,7 +70,7 @@ export default function Login({ onLoggedIn }) {
               Rol
             </label>
             <div
-              className={`grid grid-cols-2 gap-2 rounded-xl border border-slate-800 bg-slate-950 p-1 ${
+              className={`grid grid-cols-2 gap-2 sm:grid-cols-3 rounded-xl border border-slate-800 bg-slate-950 p-1 ${
                 !useEnvLogin ? "opacity-50 pointer-events-none" : ""
               }`}
             >

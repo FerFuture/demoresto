@@ -689,34 +689,26 @@ function formatTotal(totalAmount) {
   }).format(Number(totalAmount) || 0);
 }
 
-/** Notas del pedido: detalle agrupado (ej. mariolis x6). Sin modalidad ni dirección (van en columnas propias). */
-function groupItemNamesForOrderNotes(names) {
-  const list = Array.isArray(names) ? names.map((x) => String(x || "").trim()).filter(Boolean) : [];
-  const counts = new Map();
-  const order = [];
-  for (const n of list) {
-    if (!counts.has(n)) {
-      counts.set(n, 0);
-      order.push(n);
-    }
-    counts.set(n, counts.get(n) + 1);
-  }
-  const parts = order.map((name) => {
-    const c = counts.get(name);
-    return c > 1 ? `${name} x${c}` : name;
-  });
-  return parts.join(", ");
+/**
+ * Texto en `orders.notes` para pedidos del cliente (WhatsApp): solo dato operativo.
+ * El detalle de productos queda en la columna `items` (JSON).
+ */
+function paymentMethodLabelForOperationalNotes(paymentMethod) {
+  const p = String(paymentMethod || "").toLowerCase();
+  if (p.includes("mercado") || p === "mp" || p === "mercadopago") return "Mercado Pago";
+  if (p.includes("efectivo") || p === "cash") return "Efectivo al recibir";
+  return String(paymentMethod || "").trim() || "—";
 }
 
-function buildOrderNotesFromSession(session) {
-  const items = Array.isArray(session?.items) ? session.items : [];
-  const fromItems = groupItemNamesForOrderNotes(items);
-  if (fromItems) return `Detalle: ${fromItems}`;
-  const details = String(session?.details || "").trim();
-  if (details) {
-    const pieces = details.split(",").map((s) => s.trim()).filter(Boolean);
-    const grouped = groupItemNamesForOrderNotes(pieces);
-    return grouped ? `Detalle: ${grouped}` : "";
+function buildCustomerOperationalNotes({ fulfillmentType, address, customerPhone, paymentMethod }) {
+  const ft = String(fulfillmentType || "").toLowerCase();
+  if (ft === "delivery") {
+    const addr = String(address || "").trim();
+    return `Dirección: ${addr || "—"} | Pago: ${paymentMethodLabelForOperationalNotes(paymentMethod)}`;
+  }
+  if (ft === "local") {
+    const ph = String(customerPhone || "").replace(/\D/g, "");
+    return `Teléfono: ${ph || "—"} | Retiro en local`;
   }
   return "";
 }
@@ -756,13 +748,6 @@ function detectDeliveryTotalConfirmationIntent(rawText) {
   if (/\bconfirm(o|amos)?\s+(el\s+)?pedido\b/i.test(lower)) return "accept";
 
   return "unknown";
-}
-
-function buildNotesWithCustomerTotalConfirm(baseNotes) {
-  const b = String(baseNotes || "").trim();
-  const tag = "Cliente confirmó el total con envío (WhatsApp).";
-  if (b.includes(tag)) return b;
-  return b ? `${b} | ${tag}` : tag;
 }
 
 async function handleCustomerDeliveryTotalConfirmation({
@@ -835,13 +820,20 @@ async function handleCustomerDeliveryTotalConfirmation({
     return cancelReply;
   }
 
-  const newNotes = buildNotesWithCustomerTotalConfirm(order.notes);
+  const refreshedNotes = buildCustomerOperationalNotes({
+    fulfillmentType: order.fulfillment_type || "delivery",
+    address: order.address,
+    customerPhone: order.customer_phone || order.customer_number,
+    paymentMethod: order.payment_method
+  });
+  const confirmedAt = new Date().toISOString();
   const updated = await updateOrderMatching(
     order.id,
     {
-      status: "pending",
+      status: "confirmed",
       payment_status: "pending",
-      notes: newNotes
+      notes: refreshedNotes,
+      delivery_total_confirmed_at: confirmedAt
     },
     { expectStatus: "awaiting_delivery_total_confirm" }
   );
@@ -2138,7 +2130,6 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
 
   if (session.status === "awaiting_payment") {
     const isLocal = session.fulfillmentType === "local";
-    const orderNotesBase = buildOrderNotesFromSession(session);
     const customerPhone = await resolveCustomerPhone(message, client);
     const baseOrderPayload = {
       restaurantId: tenant.id,
@@ -2147,7 +2138,6 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       customerPhone,
       botNumber,
       items: session.items?.length ? session.items : [session.details],
-      notes: orderNotesBase,
       address: session.deliveryAddress || null,
       rawRequest: session.conversationText,
       totalAmount: session.totalAmount
@@ -2211,6 +2201,12 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
       }
       const order = await saveOrder({
         ...baseOrderPayload,
+        notes: buildCustomerOperationalNotes({
+          fulfillmentType: "local",
+          address: null,
+          customerPhone,
+          paymentMethod: null
+        }),
         status: "pending",
         paymentMethod: "mercadopago",
         paymentStatus: "pending",
@@ -2282,6 +2278,12 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
     if (option === 1 || hasAnyPhrase(text, INTENT_PHRASES.cash)) {
       const order = await saveOrder({
         ...baseOrderPayload,
+        notes: buildCustomerOperationalNotes({
+          fulfillmentType: "delivery",
+          address: session.deliveryAddress || null,
+          customerPhone,
+          paymentMethod: "efectivo"
+        }),
         status: "awaiting_delivery_fee",
         paymentMethod: "efectivo",
         paymentStatus: "pending",
@@ -2331,6 +2333,12 @@ async function handleTextMessage(message, restaurantContext, tenant, customerNum
 
       const order = await saveOrder({
         ...baseOrderPayload,
+        notes: buildCustomerOperationalNotes({
+          fulfillmentType: "delivery",
+          address: session.deliveryAddress || null,
+          customerPhone,
+          paymentMethod: "mercadopago"
+        }),
         status: "awaiting_delivery_fee",
         paymentMethod: "mercadopago",
         paymentStatus: "pending",

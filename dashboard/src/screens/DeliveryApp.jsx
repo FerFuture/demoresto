@@ -9,7 +9,7 @@ import {
   effectiveOrderTotal,
   flattenOrderItems,
   formatDateTime,
-  formatOrderNotesForDisplay,
+  kitchenMetaBoxContent,
   formatPhoneLabel,
   groupOrderItemRows,
   isDeliveryOrder,
@@ -898,10 +898,10 @@ function DeliveryOrderCard({
           </p>
         ) : null}
 
-        {order.notes && !items.length ? null : order.notes ? (
+        {kitchenMetaBoxContent(order) ? (
           <p className="rounded-lg border border-slate-800 bg-slate-950/50 p-2 text-xs text-slate-400">
             <span className="font-medium text-slate-300">Notas:</span>{" "}
-            {formatOrderNotesForDisplay(order.notes)}
+            {kitchenMetaBoxContent(order)}
           </p>
         ) : null}
 
