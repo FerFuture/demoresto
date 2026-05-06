@@ -58,6 +58,8 @@ export default function WaiterApp({ onLogout }) {
   const [savingOrderId, setSavingOrderId] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null);
   const confirmResolverRef = useRef(null);
+  const [toast, setToast] = useState(null);
+  const toastTimerRef = useRef(null);
 
   const menuById = useMemo(() => {
     const m = new Map();
@@ -72,6 +74,18 @@ export default function WaiterApp({ onLogout }) {
     [cartById, menuById]
   );
   const totalAmount = useMemo(() => cartTotal(cartById, menuById), [cartById, menuById]);
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 3400);
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    };
+  }, [toast]);
 
   useEffect(() => {
     async function loadRestaurant() {
@@ -185,13 +199,14 @@ export default function WaiterApp({ onLogout }) {
   function requestConfirm({
     title = "Confirmar acción",
     message = "",
+    body = null,
     confirmLabel = "Confirmar",
     cancelLabel = "Cancelar",
     tone = "info"
   } = {}) {
     return new Promise((resolve) => {
       confirmResolverRef.current = resolve;
-      setConfirmDialog({ title, message, confirmLabel, cancelLabel, tone });
+      setConfirmDialog({ title, message, body, confirmLabel, cancelLabel, tone });
     });
   }
 
@@ -337,35 +352,9 @@ export default function WaiterApp({ onLogout }) {
     });
   }
 
-  async function submitOrder() {
-    setError("");
-    setMesaWarning("");
-    const table = String(tableNumber || "").trim();
-    const tableNum = parseInt(table, 10);
-    const mesaMissing = !table;
-    const mesaInvalid = Boolean(table) && (!Number.isFinite(tableNum) || tableNum < 1);
-    if (mesaMissing || mesaInvalid) {
-      const msg = mesaMissing
-        ? "Te olvidaste de indicar la mesa. Ingresá el número antes de enviar a cocina."
-        : "Ingresá un número de mesa válido (1 o más).";
-      setError(msg);
-      setMesaWarning(msg);
-      tableInputRef.current?.focus();
-      tableInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-      return;
-    }
-    if (cartLines.length === 0) {
-      setError("Agregá al menos un producto al pedido.");
-      return;
-    }
-    if (!restaurantId || !botNumber) {
-      setError("Falta configuración del restaurante.");
-      return;
-    }
-
+  async function performSubmitOrder(tableNum) {
     const session = getSession();
     const userPart = session?.username ? ` · Mozo: ${session.username}` : "";
-
     const notes = `Mozo · Mesa: ${tableNum}${userPart}`;
 
     const row = {
@@ -407,8 +396,88 @@ export default function WaiterApp({ onLogout }) {
       setCartById({});
       setTableNumber("");
       setTab("ready");
+      setToast("Listo · enviado a cocina");
     }
     setSubmitting(false);
+  }
+
+  async function submitOrder() {
+    setError("");
+    setMesaWarning("");
+    const table = String(tableNumber || "").trim();
+    const tableNum = parseInt(table, 10);
+    const mesaMissing = !table;
+    const mesaInvalid = Boolean(table) && (!Number.isFinite(tableNum) || tableNum < 1);
+    if (mesaMissing || mesaInvalid) {
+      const msg = mesaMissing
+        ? "Te olvidaste de indicar la mesa. Ingresá el número antes de enviar a cocina."
+        : "Ingresá un número de mesa válido (1 o más).";
+      setError(msg);
+      setMesaWarning(msg);
+      tableInputRef.current?.focus();
+      tableInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (cartLines.length === 0) {
+      setError("Agregá al menos un producto al pedido.");
+      return;
+    }
+    if (!restaurantId || !botNumber) {
+      setError("Falta configuración del restaurante.");
+      return;
+    }
+
+    const summaryLines = [];
+    for (const [itemId, qty] of Object.entries(cartById)) {
+      const item = menuById.get(itemId);
+      if (!item || qty < 1) continue;
+      const p = Number(item.price);
+      const lineTotal = Number.isFinite(p) ? Math.round(p * qty * 100) / 100 : 0;
+      summaryLines.push({
+        key: itemId,
+        name: String(item.name || "").trim() || "Ítem",
+        qty,
+        lineTotal
+      });
+    }
+
+    const confirmed = await requestConfirm({
+      title: "Confirmar envío a cocina",
+      message: "Revisá el pedido. Si está bien, tocá enviar para mandarlo a cocina.",
+      confirmLabel: "Sí, enviar a cocina",
+      cancelLabel: "Volver a editar",
+      tone: "info",
+      body: (
+        <div className="mt-3 space-y-3 border-t border-slate-700/80 pt-3 text-left">
+          <p className="text-sm">
+            <span className="text-slate-500">Mesa</span>{" "}
+            <span className="font-semibold text-white">{tableNum}</span>
+          </p>
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Ítems</p>
+            <ul className="mt-1 max-h-52 space-y-1 overflow-y-auto rounded-lg border border-slate-700/60 bg-slate-950/50 px-3 py-2 text-sm text-slate-200">
+              {summaryLines.map(({ key, name, qty, lineTotal }) => (
+                <li key={key} className="flex flex-wrap justify-between gap-x-2 gap-y-0.5">
+                  <span>
+                    <span className="font-medium text-emerald-100/90">{name}</span>
+                    <span className="text-slate-500"> × {qty}</span>
+                  </span>
+                  <span className="tabular-nums text-slate-400">{currency(lineTotal)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <p className="flex flex-wrap items-baseline justify-between gap-2 border-t border-slate-700/60 pt-2 text-sm">
+            <span className="text-slate-500">Total del pedido</span>
+            <span className="text-lg font-bold tabular-nums text-emerald-300">{currency(totalAmount)}</span>
+          </p>
+        </div>
+      )
+    });
+
+    if (!confirmed) return;
+
+    await performSubmitOrder(tableNum);
   }
 
   const groupedMenu = useMemo(() => {
@@ -658,6 +727,17 @@ export default function WaiterApp({ onLogout }) {
           </div>
         )}
       </main>
+      {toast ? (
+        <div
+          className="pointer-events-none fixed bottom-6 left-1/2 z-[60] -translate-x-1/2 px-4"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="pointer-events-none rounded-full border border-emerald-500/35 bg-emerald-950/90 px-4 py-2 text-center text-sm font-medium text-emerald-100 shadow-lg shadow-emerald-950/30 backdrop-blur-sm">
+            {toast}
+          </div>
+        </div>
+      ) : null}
       {confirmDialog ? (
         <ConfirmModal dialog={confirmDialog} onResolve={handleConfirmDialog} />
       ) : null}
@@ -708,7 +788,7 @@ function ConfirmModal({ dialog, onResolve }) {
         onClick={() => onResolve(false)}
       />
       <div
-        className={`relative w-full max-w-md rounded-2xl border ${palette.accent} bg-slate-900/95 p-5 shadow-2xl shadow-black/40`}
+        className={`relative max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border ${palette.accent} bg-slate-900/95 p-5 shadow-2xl shadow-black/40`}
       >
         <div className="flex items-start gap-3">
           <span
@@ -717,7 +797,7 @@ function ConfirmModal({ dialog, onResolve }) {
           >
             !
           </span>
-          <div className="flex-1">
+          <div className="min-w-0 flex-1">
             <h3
               id="waiter-confirm-modal-title"
               className="text-base font-semibold text-slate-100"
@@ -727,6 +807,7 @@ function ConfirmModal({ dialog, onResolve }) {
             {dialog.message ? (
               <p className="mt-1 text-sm text-slate-300">{dialog.message}</p>
             ) : null}
+            {dialog.body ? dialog.body : null}
           </div>
         </div>
         <div className="mt-5 flex flex-wrap justify-end gap-2">
