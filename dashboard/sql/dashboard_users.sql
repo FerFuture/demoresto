@@ -7,7 +7,7 @@ create table if not exists public.dashboard_users (
   id uuid primary key default gen_random_uuid(),
   username text not null,
   password_hash text not null,
-  role text not null check (role in ('admin', 'delivery', 'kitchen', 'waiter')),
+  role text not null check (role in ('admin', 'encargado', 'delivery', 'kitchen', 'waiter')),
   label text,
   is_active boolean not null default true,
   delivery_work_weekdays integer[],

@@ -269,7 +269,7 @@ async function processDeliveryFeeReadyOrder(orderRow, whatsappClient) {
       body = buildMpFinalMessage(ticketBlock, paymentUrl);
       patch = {
         customer_notified_at: new Date().toISOString(),
-        status: "pending",
+        status: "confirmed",
         payment_status: "pending",
         payment_link: paymentUrl
       };
@@ -539,6 +539,17 @@ async function scanDeliveryEnRoutePending(whatsappClient) {
 async function buildPickupReadyWhatsAppBody(orderRow) {
   const name = (await getRestaurantNameById(orderRow.restaurant_id)) || "el restaurante";
   const brand = String(name).trim() || "el local";
+  const ft = String(orderRow?.fulfillment_type || "").trim().toLowerCase();
+  if (ft === "mesa") {
+    const tn = orderRow?.table_number;
+    const mesaTxt =
+      tn != null && tn !== "" && Number.isFinite(Number(tn)) ? `mesa ${Number(tn)}` : "tu mesa";
+    return [
+      "*Tu pedido está listo*",
+      `Te lo están llevando a la *${mesaTxt}* en *${brand}*.`,
+      "¡Gracias!"
+    ].join("\n");
+  }
   return [
     "*Tu pedido está listo para retirar*",
     `Ya podés pasar por *${brand}* a buscarlo.`,
@@ -552,7 +563,8 @@ async function buildPickupReadyWhatsAppBody(orderRow) {
  */
 async function processPickupReadyNotifyOrder(orderRow, whatsappClient) {
   if (!orderRow?.id) return;
-  if (String(orderRow.fulfillment_type || "").toLowerCase() !== "local") return;
+  const ftPickup = String(orderRow.fulfillment_type || "").toLowerCase();
+  if (ftPickup !== "local" && ftPickup !== "mesa") return;
   if (orderRow.status !== "confirmed") return;
   if (!orderRow.pickup_ready_notify_requested_at) return;
   if (orderRow.pickup_ready_customer_notified_at) return;
@@ -617,7 +629,7 @@ async function scanPickupReadyNotifyPending(whatsappClient) {
   const { data, error } = await supabase
     .from(TABLES.orders)
     .select("*")
-    .eq("fulfillment_type", "local")
+    .in("fulfillment_type", ["local", "mesa"])
     .eq("status", "confirmed")
     .not("pickup_ready_notify_requested_at", "is", null)
     .is("pickup_ready_customer_notified_at", null)

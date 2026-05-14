@@ -18,7 +18,7 @@ order by tablename, policyname;
 -- Esperado (resumen):
 --   orders:     restobot_orders_anon_{select,insert,update} + auth_* (mismo set)
 --   menu_items: restobot_menu_items_anon_all (incluye DELETE para borrar ítems en dashboard)
---   restaurants: restobot_restaurants_anon_select (+ auth select)
+--   restaurants: restobot_restaurants_anon_{select,update} (+ auth select/update)
 --   bot_interactions: anon/auth select + insert (sin update; el dashboard no la usa)
 
 -- 2) RLS activado por tabla

@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../supabaseClient";
+import { fetchRestaurantForDashboard } from "../lib/restaurantTenant";
 import {
   formatDateTime,
   groupOrderItemRows,
   isDeliveryOrder,
+  isWaiterDeliveryOrder,
   kitchenMetaBoxContent,
   normalizeOrderStatus,
   orderInKitchenQueue,
@@ -20,18 +22,10 @@ export default function KitchenApp({ onLogout }) {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [savingOrderId, setSavingOrderId] = useState(null);
 
   useEffect(() => {
     async function loadRestaurant() {
-      const configuredBotNumber = (import.meta.env.VITE_BOT_WHATSAPP_NUMBER || "").replace(/\D/g, "");
-      let query = supabase.from("restaurants").select("id, name, whatsapp_number");
-      if (configuredBotNumber) {
-        query = query.eq("whatsapp_number", configuredBotNumber);
-      } else {
-        query = query.limit(1);
-      }
-      const { data, error: queryError } = await query.maybeSingle();
+      const { data, error: queryError } = await fetchRestaurantForDashboard(supabase);
       if (queryError) {
         setError(`Error resolviendo restaurante: ${queryError.message}`);
         return;
@@ -128,37 +122,6 @@ export default function KitchenApp({ onLogout }) {
     [orders]
   );
 
-  async function markKitchenReady(order) {
-    if (!orderInKitchenQueue(order)) return;
-    setError("");
-    setSavingOrderId(order.id);
-    const readyAt = new Date().toISOString();
-    const { data: updatedRow, error: updateError } = await supabase
-      .from("orders")
-      .update({ kitchen_ready_at: readyAt })
-      .eq("id", order.id)
-      .is("kitchen_ready_at", null)
-      .select("*")
-      .maybeSingle();
-
-    if (updateError) {
-      setError(
-        updateError.message?.includes("kitchen_ready_at") || updateError.message?.includes("column")
-          ? `Falta aplicar la migración SQL (kitchen_ready_at). ${updateError.message}`
-          : `Error: ${updateError.message}`
-      );
-      setSavingOrderId(null);
-      return;
-    }
-    if (!updatedRow) {
-      setError("Otro dispositivo ya marcó este pedido o no está disponible.");
-      setSavingOrderId(null);
-      return;
-    }
-    setOrders((prev) => prev.map((row) => (row.id === order.id ? { ...row, ...updatedRow } : row)));
-    setSavingOrderId(null);
-  }
-
   return (
     <div className="dark min-h-screen bg-slate-950 text-slate-100">
       <header className="sticky top-0 z-10 border-b border-slate-800 bg-slate-950/95 backdrop-blur">
@@ -188,7 +151,7 @@ export default function KitchenApp({ onLogout }) {
           <p className="text-slate-400">Cargando pedidos…</p>
         ) : queue.length === 0 ? (
           <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-6 py-12 text-center text-slate-400">
-            No hay pedidos confirmados pendientes de elaboración.
+            No hay pedidos confirmados para elaborar en este momento.
           </div>
         ) : (
           <ul className="space-y-4">
@@ -197,6 +160,7 @@ export default function KitchenApp({ onLogout }) {
               const mesa = tableNumberLabel(order);
               const st = normalizeOrderStatus(order);
               const fromCustomer = !orderPlacedByWaiter(order);
+              const waiterDelivery = isWaiterDeliveryOrder(order);
               const kitchenMeta = kitchenMetaBoxContent(order);
               return (
                 <li
@@ -217,7 +181,9 @@ export default function KitchenApp({ onLogout }) {
                           )
                         ) : (
                           <>
-                            {isDeliveryOrder(order) ? (
+                            {waiterDelivery ? (
+                              <span className="text-sky-300">Delivery mozo</span>
+                            ) : isDeliveryOrder(order) ? (
                               <span className="text-sky-300">Delivery</span>
                             ) : (
                               <span className="text-violet-300">Local / retiro</span>
@@ -252,15 +218,6 @@ export default function KitchenApp({ onLogout }) {
                       {kitchenMeta}
                     </p>
                   ) : null}
-
-                  <button
-                    type="button"
-                    disabled={savingOrderId === order.id}
-                    onClick={() => markKitchenReady(order)}
-                    className="mt-4 w-full rounded-lg bg-emerald-600 py-3 text-sm font-semibold text-white shadow hover:bg-emerald-500 disabled:opacity-50 sm:w-auto sm:px-8"
-                  >
-                    {savingOrderId === order.id ? "Guardando…" : "Marcar listo"}
-                  </button>
                 </li>
               );
             })}

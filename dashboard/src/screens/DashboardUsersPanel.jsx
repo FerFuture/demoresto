@@ -12,6 +12,13 @@ import {
 const TABLE = "dashboard_users";
 const USERNAME_RE = /^[a-z0-9._-]{3,40}$/;
 
+/** Igual que `index.js` (`bcrypt.hashSync(..., 10)`): sin API intermedia. */
+function hashPasswordForStorage(password) {
+  const pw = String(password || "");
+  if (pw.length < 6) throw new Error("Contraseña demasiado corta");
+  return bcrypt.hashSync(pw, 10);
+}
+
 function WeekdayToggle({ value, onChange, disabled }) {
   function toggle(day) {
     const set = new Set(value);
@@ -48,6 +55,8 @@ export default function DashboardUsersPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [savingId, setSavingId] = useState(null);
+  /** Usuario pendiente de eliminar (modal en pantalla, sin `window.confirm`). */
+  const [pendingDelete, setPendingDelete] = useState(null);
 
   const [newUser, setNewUser] = useState({
     username: "",
@@ -103,7 +112,13 @@ export default function DashboardUsersPanel() {
         return;
       }
     }
-    const hash = bcrypt.hashSync(pw, 10);
+    let hash = "";
+    try {
+      hash = hashPasswordForStorage(pw);
+    } catch (e) {
+      setError(`No se pudo cifrar la contraseña: ${e?.message || e}`);
+      return;
+    }
     setSavingId("__new__");
     const { error: insErr } = await supabase.from(TABLE).insert({
       username: u,
@@ -181,7 +196,12 @@ export default function DashboardUsersPanel() {
         setError("La contraseña debe tener al menos 6 caracteres.");
         return;
       }
-      patch.password_hash = bcrypt.hashSync(pw, 10);
+      try {
+        patch.password_hash = hashPasswordForStorage(pw);
+      } catch (e) {
+        setError(`No se pudo cifrar la contraseña: ${e?.message || e}`);
+        return;
+      }
     }
     setSavingId(row.id);
     const { error: upErr } = await supabase.from(TABLE).update(patch).eq("id", row.id);
@@ -193,22 +213,27 @@ export default function DashboardUsersPanel() {
     await loadUsers();
   }
 
-  async function removeRow(row) {
-    if (
-      !window.confirm(
-        `¿Eliminar definitivamente el usuario "${row.username}"? Esta acción no se puede deshacer.`
-      )
-    ) {
-      return;
-    }
+  function openDeleteConfirm(row) {
     setError("");
-    setSavingId(row.id);
-    const { error: delErr } = await supabase.from(TABLE).delete().eq("id", row.id);
+    setPendingDelete({ id: row.id, username: row.username });
+  }
+
+  function closeDeleteConfirm() {
+    setPendingDelete(null);
+  }
+
+  async function confirmDeleteUser() {
+    if (!pendingDelete) return;
+    const { id } = pendingDelete;
+    setError("");
+    setSavingId(id);
+    const { error: delErr } = await supabase.from(TABLE).delete().eq("id", id);
     setSavingId(null);
     if (delErr) {
       setError(delErr.message);
       return;
     }
+    setPendingDelete(null);
     await loadUsers();
   }
 
@@ -217,7 +242,7 @@ export default function DashboardUsersPanel() {
       <div className="rounded-xl border border-slate-700 bg-slate-900 p-5">
         <h2 className="text-sm font-semibold text-slate-200">Usuarios del panel</h2>
         <p className="mt-1 text-xs text-slate-400">
-          Altas para admin, cocina, mozo o reparto. Para reparto, elegí los días en que puede iniciar sesión cada
+          Altas para admin, encargado, cocina, mozo o reparto. Para reparto, elegí los días en que puede iniciar sesión cada
           usuario.
         </p>
       </div>
@@ -264,6 +289,7 @@ export default function DashboardUsersPanel() {
             className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"
           >
             <option value="admin">{ROLE_LABELS.admin}</option>
+            <option value="encargado">{ROLE_LABELS.encargado}</option>
             <option value="kitchen">{ROLE_LABELS.kitchen}</option>
             <option value="waiter">{ROLE_LABELS.waiter}</option>
             <option value="delivery">{ROLE_LABELS.delivery}</option>
@@ -317,17 +343,61 @@ export default function DashboardUsersPanel() {
                 saving={savingId === row.id}
                 onSave={saveRowEdit}
                 onToggleActive={toggleActive}
-                onDelete={removeRow}
+                onDeleteRequest={openDeleteConfirm}
               />
             ))
           )}
         </div>
       )}
+
+      {pendingDelete ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-user-dialog-title"
+        >
+          <button
+            type="button"
+            className="absolute inset-0 bg-slate-950/75 backdrop-blur-sm"
+            aria-label="Cerrar"
+            onClick={closeDeleteConfirm}
+          />
+          <div className="relative w-full max-w-md rounded-2xl border border-rose-500/35 bg-slate-900 p-6 shadow-2xl shadow-black/50">
+            <h3 id="delete-user-dialog-title" className="text-lg font-semibold text-rose-100">
+              Eliminar usuario
+            </h3>
+            <p className="mt-3 text-sm text-slate-300">
+              ¿Eliminar definitivamente el usuario{" "}
+              <span className="font-mono font-semibold text-white">{pendingDelete.username}</span>? Esta acción no se
+              puede deshacer.
+            </p>
+            <div className="mt-6 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeDeleteConfirm}
+                disabled={savingId === pendingDelete.id}
+                className="rounded-lg border border-slate-600 bg-slate-800/80 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDeleteUser()}
+                disabled={savingId === pendingDelete.id}
+                className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500 disabled:opacity-50"
+              >
+                {savingId === pendingDelete.id ? "Eliminando…" : "Eliminar definitivamente"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
 
-function UserRowCard({ row, saving, onSave, onToggleActive, onDelete }) {
+function UserRowCard({ row, saving, onSave, onToggleActive, onDeleteRequest }) {
   const [draft, setDraft] = useState({
     username: row.username,
     role: row.role,
@@ -366,6 +436,7 @@ function UserRowCard({ row, saving, onSave, onToggleActive, onDelete }) {
               className="h-9 w-full max-w-xs rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm"
             >
               <option value="admin">{ROLE_LABELS.admin}</option>
+              <option value="encargado">{ROLE_LABELS.encargado}</option>
               <option value="kitchen">{ROLE_LABELS.kitchen}</option>
               <option value="waiter">{ROLE_LABELS.waiter}</option>
               <option value="delivery">{ROLE_LABELS.delivery}</option>
@@ -433,7 +504,7 @@ function UserRowCard({ row, saving, onSave, onToggleActive, onDelete }) {
           <button
             type="button"
             disabled={saving}
-            onClick={() => onDelete(row)}
+            onClick={() => onDeleteRequest(row)}
             className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-300 hover:bg-rose-500/20 disabled:opacity-50"
           >
             Eliminar

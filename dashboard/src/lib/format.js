@@ -41,14 +41,46 @@ export function normalizeOrderStatus(order) {
   return String(order?.status ?? "").trim();
 }
 
-/** Pedido cargado desde el panel Mozo (no desde WhatsApp del cliente). */
-export function orderPlacedByWaiter(order) {
+/**
+ * Pedido identificable como cargado desde el panel Mozo solo por notas
+ * (sin usar `efectivo_mesa`, que también usan clientes en mesa por WhatsApp).
+ */
+export function orderFromWaiterPanelNotes(order) {
   const notes = String(order?.notes || "");
   if (/Origen:\s*mozo\b/i.test(notes)) return true;
   if (/^Mozo\s*·\s*Mesa:/i.test(notes.trim())) return true;
+  if (/^Mozo\s*·\s*Delivery\b/i.test(notes.trim())) return true;
+  return false;
+}
+
+/** Mesa desde carta/QR/API sin identidad WhatsApp del comensal (`customer_number` vacío en BD). */
+export function orderIsAnonymousMesaWeb(order) {
+  const ft = String(order?.fulfillment_type ?? "").trim().toLowerCase();
+  if (ft !== "mesa") return false;
+  return String(order?.customer_number ?? "").trim() === "";
+}
+
+/**
+ * Línea "Cliente nro" en panel admin: sin valor cuando es mozo o mesa web sin WA del cliente.
+ */
+export function adminShowClienteNroRow(order) {
+  if (orderFromWaiterPanelNotes(order)) return false;
+  if (orderIsAnonymousMesaWeb(order)) return false;
+  return true;
+}
+
+/** Pedido cargado desde el panel Mozo (no desde WhatsApp del cliente). */
+export function orderPlacedByWaiter(order) {
+  if (orderFromWaiterPanelNotes(order)) return true;
   const pm = String(order?.payment_method ?? "").toLowerCase();
   if (pm.includes("efectivo_mesa")) return true;
   return false;
+}
+
+/** Nombre del mozo guardado al final de las notas (`· Mozo: nombre`). */
+export function waiterNameFromMozoNotes(notes) {
+  const m = String(notes || "").match(/·\s*Mozo:\s*(.+)$/im);
+  return m ? m[1].trim() : "";
 }
 
 /** Solo UI (dashboard): estado del pedido en español; la BD no cambia. */
@@ -80,9 +112,14 @@ export function fulfillmentIsDelivery(order) {
   return ft === "delivery";
 }
 
+export function fulfillmentIsWaiterDelivery(order) {
+  const ft = String(order?.fulfillment_type ?? "").trim().toLowerCase();
+  return ft === "delivery_mozo";
+}
+
 export function fulfillmentIsPickup(order) {
   const ft = String(order?.fulfillment_type ?? "").trim().toLowerCase();
-  return ft === "local";
+  return ft === "local" || ft === "mesa" || ft === "delivery_mozo";
 }
 
 export function notesIndicateCustomerConfirmedDeliveryTotal(order) {
@@ -172,6 +209,10 @@ export function notesIndicateDelivery(order) {
 
 export function isDeliveryOrder(order) {
   return fulfillmentIsDelivery(order) || notesIndicateDelivery(order);
+}
+
+export function isWaiterDeliveryOrder(order) {
+  return fulfillmentIsWaiterDelivery(order);
 }
 
 export function deliveryFeeStillUnset(order) {
@@ -283,16 +324,15 @@ export function groupOrderItemRows(order) {
   return ord.map((name) => ({ name, count: counts.get(name) }));
 }
 
-/** Pedido en cola de cocina: confirmado, aún sin marcar listo. */
+/** Pedido que cocina debe elaborar: confirmado y aún abierto. No hace falta marcar “listo” en el panel. */
 export function orderInKitchenQueue(order) {
   const st = normalizeOrderStatus(order);
   if (st === "delivered" || st === "cancelled") return false;
   if (st !== "confirmed") return false;
-  if (order?.kitchen_ready_at) return false;
   return true;
 }
 
-/** Cocina ya marcó listo (listo para entregar / avisar). */
+/** Marca histórica si alguna vez se guardó kitchen_ready_at (p. ej. datos viejos). */
 export function orderKitchenReady(order) {
   return Boolean(order?.kitchen_ready_at);
 }
@@ -329,8 +369,9 @@ export function formatOrderNotesForDisplay(rawNotes) {
 /** Método de pago legible para cocina (pedidos del cliente). */
 export function kitchenPaymentMethodLabelEs(order) {
   const key = paymentMethodKey(order);
+  const ft = String(order?.fulfillment_type ?? "").trim().toLowerCase();
   if (key === "mp") return "Mercado Pago";
-  if (key === "cash") return "Efectivo al recibir";
+  if (key === "cash") return ft === "mesa" ? "Efectivo en la mesa" : "Efectivo al recibir";
   const raw = String(order?.payment_method ?? "").trim();
   return raw || "—";
 }
@@ -340,6 +381,33 @@ export function kitchenPaymentMethodLabelEs(order) {
  * Mozo: notas operativas (sin prefijo "Origen"). Cliente delivery: dirección + pago. Cliente local: teléfono + retiro.
  */
 export function kitchenMetaBoxContent(order) {
+  if (orderPlacedByWaiter(order) && isWaiterDeliveryOrder(order)) {
+    const addr = String(order?.address ?? "").trim();
+    const scheduled = formatDateTime(order?.scheduled_delivery_at);
+    const mozo = waiterNameFromMozoNotes(order?.notes);
+    return [
+      `Delivery mozo`,
+      `Dirección: ${addr || "—"}`,
+      scheduled ? `Programado: ${scheduled}` : "",
+      mozo ? `Mozo: ${mozo}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+  }
+  if (orderPlacedByWaiter(order) && isDeliveryOrder(order)) {
+    const addr = String(order?.address ?? "").trim();
+    const pay = kitchenPaymentMethodLabelEs(order);
+    const scheduled = formatDateTime(order?.scheduled_delivery_at);
+    const mozo = waiterNameFromMozoNotes(order?.notes);
+    return [
+      `Dirección: ${addr || "—"}`,
+      scheduled ? `Programado: ${scheduled}` : "",
+      `Pago: ${pay}`,
+      mozo ? `Mozo: ${mozo}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+  }
   if (orderPlacedByWaiter(order)) {
     let raw = String(order?.notes || "").trim();
     if (!raw) return "";
@@ -354,6 +422,12 @@ export function kitchenMetaBoxContent(order) {
   }
   const digits = callableCustomerPhone(order);
   const phone = digits ? formatPhoneLabel(digits) : "—";
+  const ft = String(order?.fulfillment_type ?? "").trim().toLowerCase();
+  if (ft === "mesa") {
+    const mesa = tableNumberLabel(order);
+    const pay = kitchenPaymentMethodLabelEs(order);
+    return `Mesa: ${mesa || "—"} | Teléfono: ${phone} | Pago: ${pay}`;
+  }
   return `Teléfono: ${phone} | Retiro en local`;
 }
 
@@ -381,7 +455,13 @@ export function adminDashboardNotesBlock(order) {
   }
 
   const joined = chunks.filter(Boolean).join(" // ");
-  if (joined) return joined;
+  if (joined) {
+    if (orderPlacedByWaiter(order)) {
+      const mozo = waiterNameFromMozoNotes(order?.notes);
+      if (mozo) return `${joined} // Mozo: ${mozo}`;
+    }
+    return joined;
+  }
   return (
     formatOrderNotesForDisplay(order?.notes) ||
     String(order?.raw_request || "").trim() ||

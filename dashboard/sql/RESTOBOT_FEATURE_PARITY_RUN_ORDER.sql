@@ -1,0 +1,16 @@
+-- Ejecutar en Supabase SQL Editor para dejar `restobot` al nivel funcional del código actual.
+-- Este archivo es una guía de orden. Copiá/pegá y ejecutá los archivos indicados en esta secuencia:
+--
+-- 1) dashboard_users.sql
+-- 2) dashboard_users_role_encargado.sql
+-- 3) restaurants_config_columns.sql
+-- 4) stock_manager_tables.sql
+-- 5) rls_policies_restobot.sql
+-- 6) grants_api_roles_restobot.sql
+-- 7) rls_step2_verify.sql
+--
+-- Notas:
+-- - `menu_seed_resto_illimani.sql` NO es parte obligatoria de la paridad funcional de restobot;
+--   solo sirve si querés sembrar el menú del cliente Illimani.
+-- - Si alguna tabla/columna ya existe, estos SQL son mayormente idempotentes y deberían re-ejecutarse sin problema.
+-- - `rls_step2_verify.sql` es de verificación, no de creación de estructuras.

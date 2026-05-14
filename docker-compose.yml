@@ -5,6 +5,8 @@ services:
     restart: always
     env_file:
       - .env
+    ports:
+      - "3001:3000"
     volumes:
       - ./.wwebjs_auth:/app/.wwebjs_auth
       - ./tmp_audio:/app/tmp_audio

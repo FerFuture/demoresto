@@ -34,12 +34,31 @@ function defineIfPresent(defineKey, value) {
   return v ? { [defineKey]: JSON.stringify(v) } : {};
 }
 
+/**
+ * Carpeta donde está el `.env` real. En Docker el proyecto vive en `/app` y el compose monta el `.env`
+ * del repo en `/app/.env`; el padre de `/app` es `/`, así que no sirve usar solo `../`.
+ */
+function resolveEnvDir() {
+  const repoParent = path.join(__dirname, "..");
+  const candidates = [repoParent, __dirname, "/app"];
+  for (const dir of candidates) {
+    try {
+      if (dir && fs.existsSync(path.join(dir, ".env"))) return dir;
+    } catch {
+      /* ignore */
+    }
+  }
+  return repoParent;
+}
+
 export default defineConfig(({ mode }) => {
   const repoRoot = path.join(__dirname, "..");
+  const envDirResolved = resolveEnvDir();
   const fromFiles = {
     ...loadEnv(mode, repoRoot, ""),
     ...loadEnv(mode, __dirname, ""),
-    ...readDotEnvFile("/app/.env")
+    ...readDotEnvFile("/app/.env"),
+    ...loadEnv(mode, envDirResolved, "")
   };
 
   const supabaseUrl = pick(
@@ -56,12 +75,20 @@ export default defineConfig(({ mode }) => {
   );
   const botNumber = pick(
     process.env.VITE_BOT_WHATSAPP_NUMBER,
+    process.env.BOT_WHATSAPP_NUMBER,
     fromFiles.VITE_BOT_WHATSAPP_NUMBER,
+    fromFiles.BOT_WHATSAPP_NUMBER,
     fromFiles.DASHBOARD_BOT_WHATSAPP_NUMBER,
     fromFiles.WWEBJS_BOT_NUMBER
   );
   const adminPw = pick(process.env.VITE_ADMIN_PASSWORD, fromFiles.VITE_ADMIN_PASSWORD);
   const deliveryPw = pick(process.env.VITE_DELIVERY_PASSWORD, fromFiles.VITE_DELIVERY_PASSWORD);
+  const maestroPw = pick(process.env.VITE_MAESTRO_PASSWORD, fromFiles.VITE_MAESTRO_PASSWORD);
+  const mesaQrSecret = pick(process.env.VITE_MESA_QR_SECRET, fromFiles.VITE_MESA_QR_SECRET);
+  const publicDashboardUrl = pick(
+    process.env.VITE_PUBLIC_DASHBOARD_URL,
+    fromFiles.VITE_PUBLIC_DASHBOARD_URL
+  );
 
   const isVercelBuild = Boolean(process.env.VERCEL);
   if (isVercelBuild && mode === "production" && (!supabaseUrl || !supabaseKey)) {
@@ -73,7 +100,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
-    envDir: repoRoot,
+    envDir: envDirResolved,
     server: {
       host: "0.0.0.0",
       port: 5173
@@ -83,7 +110,10 @@ export default defineConfig(({ mode }) => {
       ...defineIfPresent("import.meta.env.VITE_SUPABASE_KEY", supabaseKey),
       ...defineIfPresent("import.meta.env.VITE_BOT_WHATSAPP_NUMBER", botNumber),
       ...defineIfPresent("import.meta.env.VITE_ADMIN_PASSWORD", adminPw),
-      ...defineIfPresent("import.meta.env.VITE_DELIVERY_PASSWORD", deliveryPw)
+      ...defineIfPresent("import.meta.env.VITE_DELIVERY_PASSWORD", deliveryPw),
+      ...defineIfPresent("import.meta.env.VITE_MAESTRO_PASSWORD", maestroPw),
+      ...defineIfPresent("import.meta.env.VITE_MESA_QR_SECRET", mesaQrSecret),
+      ...defineIfPresent("import.meta.env.VITE_PUBLIC_DASHBOARD_URL", publicDashboardUrl)
     }
   };
 });

@@ -5,7 +5,14 @@
 alter table public.restaurants
   add column if not exists public_name text,
   add column if not exists address text,
-  add column if not exists delivery_zones text;
+  add column if not exists delivery_zones text,
+  add column if not exists delivery_enabled boolean not null default true,
+  add column if not exists local_enabled boolean not null default true,
+  add column if not exists mesa_enabled boolean not null default true,
+  add column if not exists cash_enabled boolean not null default true,
+  add column if not exists mercadopago_enabled boolean not null default true,
+  add column if not exists stats_enabled boolean not null default true,
+  add column if not exists table_count integer not null default 12;
 
 -- `opening_hours` y `policies` ya existian; quedan como estan.
 
@@ -26,5 +33,5 @@ select column_name, data_type
 from information_schema.columns
 where table_schema = 'public'
   and table_name = 'restaurants'
-  and column_name in ('public_name','address','delivery_zones','opening_hours','policies','name','whatsapp_number')
+  and column_name in ('public_name','address','delivery_zones','delivery_enabled','local_enabled','mesa_enabled','cash_enabled','mercadopago_enabled','stats_enabled','table_count','opening_hours','policies','name','whatsapp_number')
 order by column_name;

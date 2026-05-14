@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../supabaseClient";
 import { getSession, logout } from "../lib/auth";
+import { fetchRestaurantForDashboard } from "../lib/restaurantTenant";
 import { deliveryMayLoginToday } from "../lib/deliverySchedule";
 import {
   callableCustomerPhone,
@@ -25,6 +26,7 @@ const REVERT_DELIVERY_WINDOW_MS = 15 * 60 * 1000;
 export default function DeliveryApp({ onLogout }) {
   const [restaurantId, setRestaurantId] = useState("");
   const [restaurantName, setRestaurantName] = useState("");
+  const [deliveryGloballyDisabled, setDeliveryGloballyDisabled] = useState(false);
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -96,14 +98,7 @@ export default function DeliveryApp({ onLogout }) {
 
   useEffect(() => {
     async function loadRestaurant() {
-      const configuredBotNumber = (import.meta.env.VITE_BOT_WHATSAPP_NUMBER || "").replace(/\D/g, "");
-      let query = supabase.from("restaurants").select("id, name, whatsapp_number");
-      if (configuredBotNumber) {
-        query = query.eq("whatsapp_number", configuredBotNumber);
-      } else {
-        query = query.limit(1);
-      }
-      const { data, error: queryError } = await query.maybeSingle();
+      const { data, error: queryError } = await fetchRestaurantForDashboard(supabase);
       if (queryError) {
         setError(`Error resolviendo restaurante: ${queryError.message}`);
         return;
@@ -114,6 +109,7 @@ export default function DeliveryApp({ onLogout }) {
       }
       setRestaurantId(data.id);
       setRestaurantName(data.name || "");
+      setDeliveryGloballyDisabled(data.delivery_enabled === false);
     }
     loadRestaurant();
   }, []);
@@ -558,6 +554,30 @@ export default function DeliveryApp({ onLogout }) {
     return (
       <div className="dark flex min-h-screen items-center justify-center bg-slate-950 px-6 text-slate-300">
         <p className="text-sm">Comprobando acceso al panel…</p>
+      </div>
+    );
+  }
+
+  if (deliveryGloballyDisabled) {
+    return (
+      <div className="dark flex min-h-screen flex-col items-center justify-center bg-slate-950 px-6 text-center">
+        <div className="max-w-md rounded-2xl border border-amber-800/50 bg-slate-900/90 p-8 shadow-xl">
+          <h2 className="text-lg font-semibold text-slate-100">Delivery pausado</h2>
+          <p className="mt-3 text-sm leading-relaxed text-slate-400">
+            El local desactivó los pedidos con envío a domicilio. Cuando lo reactiven vas a poder usar este panel de
+            nuevo.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              logout();
+              onLogout();
+            }}
+            className="mt-6 w-full rounded-lg bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
+          >
+            Salir
+          </button>
+        </div>
       </div>
     );
   }

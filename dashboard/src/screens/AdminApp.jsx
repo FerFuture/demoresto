@@ -11,10 +11,13 @@ import {
   fulfillmentIsPickup,
   adminDashboardNotesBlock,
   isDeliveryOrder,
+  isWaiterDeliveryOrder,
   normalizeOrderStatus,
   notesIndicateDelivery,
   orderNeedsDeliveryFeeControls,
   adminShowNotifyDeliveriesReadyButton,
+  adminShowClienteNroRow,
+  orderFromWaiterPanelNotes,
   orderInKitchenQueue,
   orderKitchenReady,
   paymentIsApproved,
@@ -26,9 +29,250 @@ import {
 } from "../lib/format";
 import AdminStats from "./AdminStats";
 import DashboardUsersPanel from "./DashboardUsersPanel";
+import MaestroPanel from "./MaestroPanel";
+import MesaQrLinksPanel from "../components/MesaQrLinksPanel";
+import StockManagerPanel from "../components/StockManagerPanel";
 import OrdersDateRangeCalendar from "../components/OrdersDateRangeCalendar";
+import { fetchRestaurantForDashboard } from "../lib/restaurantTenant";
+import { getSession } from "../lib/auth";
+import { WEEKDAY_OPTIONS } from "../lib/deliverySchedule";
 
 const CANCEL_REVERT_WINDOW_MS = 30 * 60 * 1000;
+const BUSINESS_HOUR_WEEKDAY_OPTIONS = WEEKDAY_OPTIONS.map(({ value, label }) => ({
+  value: value === 0 ? 7 : value,
+  label
+}));
+const ALL_BUSINESS_HOUR_DAY_VALUES = BUSINESS_HOUR_WEEKDAY_OPTIONS.map(({ value }) => value);
+const BUSINESS_DAY_NAMES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
+const BUSINESS_DAY_ALIASES = {
+  lunes: 1,
+  lun: 1,
+  martes: 2,
+  mar: 2,
+  miercoles: 3,
+  mie: 3,
+  mier: 3,
+  jueves: 4,
+  jue: 4,
+  viernes: 5,
+  vie: 5,
+  sabado: 6,
+  sab: 6,
+  domingo: 7,
+  dom: 7
+};
+const BUSINESS_DAY_ALIAS_KEYS = Object.keys(BUSINESS_DAY_ALIASES).sort((a, b) => b.length - a.length);
+const BUSINESS_DAY_ALIAS_REGEX = new RegExp(`\\b(${BUSINESS_DAY_ALIAS_KEYS.join("|")})s?\\b`, "g");
+const BUSINESS_DAY_RANGE_REGEX = new RegExp(
+  `\\b(${BUSINESS_DAY_ALIAS_KEYS.join("|")})s?\\b\\s*(?:a|al|hasta|-)\\s*\\b(${BUSINESS_DAY_ALIAS_KEYS.join("|")})s?\\b`,
+  "g"
+);
+
+function normalizeMenuCategoryInput(value) {
+  const text = String(value ?? "");
+  return text.toLocaleUpperCase("es-AR");
+}
+
+function normalizeMenuCategoryForStorage(value) {
+  const text = normalizeMenuCategoryInput(value).trim();
+  return text || null;
+}
+
+function stripDiacritics(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function normalizeBusinessHoursText(value) {
+  return stripDiacritics(value).toLowerCase().replace(/[|]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function normalizeBusinessOpenDays(days) {
+  return [...new Set((Array.isArray(days) ? days : []).map(Number))]
+    .filter((day) => day >= 1 && day <= 7)
+    .sort((a, b) => a - b);
+}
+
+function formatBusinessHourInput(rawValue) {
+  const digits = String(rawValue || "")
+    .replace(/\D/g, "")
+    .slice(0, 4);
+  if (!digits) return "";
+  if (digits.length <= 2) return digits;
+  return `${digits.slice(0, 2)}:${digits.slice(2)}`;
+}
+
+function normalizeBusinessHourValue(rawValue) {
+  const digits = String(rawValue || "")
+    .replace(/\D/g, "")
+    .slice(0, 4);
+  if (!digits) return "";
+  if (digits.length === 3) return `0${digits.slice(0, 1)}:${digits.slice(1)}`;
+  if (digits.length === 4) return `${digits.slice(0, 2)}:${digits.slice(2)}`;
+  return digits;
+}
+
+function isValidBusinessHourValue(value) {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value || ""));
+}
+
+function dayNumberFromBusinessAlias(raw) {
+  const key = String(raw || "").toLowerCase().trim();
+  return BUSINESS_DAY_ALIASES[key] || null;
+}
+
+function addBusinessDayRange(targetSet, fromDay, toDay) {
+  if (!fromDay || !toDay) return;
+  if (fromDay <= toDay) {
+    for (let day = fromDay; day <= toDay; day += 1) targetSet.add(day);
+    return;
+  }
+  for (let day = fromDay; day <= 7; day += 1) targetSet.add(day);
+  for (let day = 1; day <= toDay; day += 1) targetSet.add(day);
+}
+
+function parseBusinessOpenDaysFromText(rawText) {
+  const text = normalizeBusinessHoursText(rawText);
+  if (!text) return null;
+  if (/\btodos?\s+los?\s+dias\b/.test(text)) return [...ALL_BUSINESS_HOUR_DAY_VALUES];
+
+  const openSet = new Set();
+  BUSINESS_DAY_RANGE_REGEX.lastIndex = 0;
+  let rangeMatch = BUSINESS_DAY_RANGE_REGEX.exec(text);
+  while (rangeMatch) {
+    addBusinessDayRange(
+      openSet,
+      dayNumberFromBusinessAlias(rangeMatch[1]),
+      dayNumberFromBusinessAlias(rangeMatch[2])
+    );
+    rangeMatch = BUSINESS_DAY_RANGE_REGEX.exec(text);
+  }
+
+  BUSINESS_DAY_ALIAS_REGEX.lastIndex = 0;
+  let singleMatch = BUSINESS_DAY_ALIAS_REGEX.exec(text);
+  while (singleMatch) {
+    const dayNum = dayNumberFromBusinessAlias(singleMatch[1]);
+    if (dayNum) openSet.add(dayNum);
+    singleMatch = BUSINESS_DAY_ALIAS_REGEX.exec(text);
+  }
+
+  const closedSet = new Set();
+  for (const dayAlias of BUSINESS_DAY_ALIAS_KEYS) {
+    const reA = new RegExp(`\\b${dayAlias}s?\\b[^.\\n\\r]{0,24}\\bcerrad`, "i");
+    const reB = new RegExp(`\\bcerrad[^.\\n\\r]{0,24}\\b${dayAlias}s?\\b`, "i");
+    if (reA.test(text) || reB.test(text)) {
+      const dayNum = dayNumberFromBusinessAlias(dayAlias);
+      if (dayNum) closedSet.add(dayNum);
+    }
+  }
+  for (const dayNum of closedSet) openSet.delete(dayNum);
+
+  const out = [...openSet].sort((a, b) => a - b);
+  return out.length ? out : null;
+}
+
+function parseBusinessHoursFromOpeningHoursText(rawText) {
+  const text = normalizeBusinessHoursText(rawText);
+  if (!text) return null;
+
+  const timeMatches = [...text.matchAll(/\b([01]?\d|2[0-3])[:.]([0-5]\d)\b/g)];
+  if (timeMatches.length < 2) return null;
+  const openTime = `${String(timeMatches[0][1]).padStart(2, "0")}:${timeMatches[0][2]}`;
+  const closeTime = `${String(timeMatches[1][1]).padStart(2, "0")}:${timeMatches[1][2]}`;
+  const openDays = parseBusinessOpenDaysFromText(text) || [...ALL_BUSINESS_HOUR_DAY_VALUES];
+
+  return { openDays, openTime, closeTime };
+}
+
+function parseBusinessHoursFromMetadata(metadata) {
+  const raw = metadata?.business_hours;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const openDays = normalizeBusinessOpenDays(raw.open_days);
+  const openTime = normalizeBusinessHourValue(raw.open_time || "");
+  const closeTime = normalizeBusinessHourValue(raw.close_time || "");
+  if (!openDays.length || !isValidBusinessHourValue(openTime) || !isValidBusinessHourValue(closeTime)) {
+    return null;
+  }
+  return { openDays, openTime, closeTime };
+}
+
+function formatBusinessDays(days) {
+  const normalized = normalizeBusinessOpenDays(days);
+  if (!normalized.length) return "";
+  if (normalized.length === 7) return "Todos los días";
+  let run = [normalized[0]];
+  const ranges = [];
+  for (let i = 1; i < normalized.length; i += 1) {
+    if (normalized[i] === run[run.length - 1] + 1) run.push(normalized[i]);
+    else {
+      ranges.push(run);
+      run = [normalized[i]];
+    }
+  }
+  ranges.push(run);
+  return ranges
+    .map((range) =>
+      range.length === 1
+        ? BUSINESS_DAY_NAMES[range[0] - 1]
+        : `${BUSINESS_DAY_NAMES[range[0] - 1]} a ${BUSINESS_DAY_NAMES[range[range.length - 1] - 1]}`
+    )
+    .join(", ");
+}
+
+function buildOpeningHoursText(openDays, openTime, closeTime) {
+  const normalizedDays = normalizeBusinessOpenDays(openDays);
+  if (
+    !normalizedDays.length ||
+    !isValidBusinessHourValue(openTime) ||
+    !isValidBusinessHourValue(closeTime)
+  ) {
+    return "";
+  }
+  return `${formatBusinessDays(normalizedDays)} de ${openTime} a ${closeTime}.`;
+}
+
+function resolveBusinessHoursFormState(openingHours, metadata) {
+  const fromMetadata = parseBusinessHoursFromMetadata(metadata);
+  if (fromMetadata) return fromMetadata;
+  const fromText = parseBusinessHoursFromOpeningHoursText(openingHours);
+  if (fromText) return fromText;
+  return {
+    openDays: [...ALL_BUSINESS_HOUR_DAY_VALUES],
+    openTime: "",
+    closeTime: ""
+  };
+}
+
+function WeekdayToggle({ value, onChange, disabled }) {
+  function toggle(day) {
+    const set = new Set(normalizeBusinessOpenDays(value));
+    if (set.has(day)) set.delete(day);
+    else set.add(day);
+    onChange([...set].sort((a, b) => a - b));
+  }
+
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {BUSINESS_HOUR_WEEKDAY_OPTIONS.map(({ value: dayValue, label }) => {
+        const on = value.includes(dayValue);
+        return (
+          <button
+            key={dayValue}
+            type="button"
+            disabled={disabled}
+            onClick={() => toggle(dayValue)}
+            className={`rounded-lg border px-2 py-1 text-[11px] font-medium transition disabled:opacity-50 ${
+              on
+                ? "border-emerald-500/60 bg-emerald-500/20 text-emerald-200"
+                : "border-slate-700 bg-slate-950 text-slate-500 hover:border-slate-600"
+            }`}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 function canRevertCancellation(order) {
   if (normalizeOrderStatus(order) !== "cancelled") return false;
@@ -43,6 +287,32 @@ function shouldShowDeliveryRepartoSection(order) {
     return false;
   }
   return true;
+}
+
+function isLocalPickupOrder(order) {
+  return String(order?.fulfillment_type ?? "").trim().toLowerCase() === "local";
+}
+
+/**
+ * Coincide con la etiqueta "Pedido en mesa" del panel: cliente en salón o carga mozo.
+ * No tiene sentido avisar "listo para retiro" porque ya están en el local atendidos.
+ */
+function isPedidoEnMesaSalon(order) {
+  const ft = String(order?.fulfillment_type ?? "").trim().toLowerCase();
+  return (
+    ft === "mesa" ||
+    (orderFromWaiterPanelNotes(order) && ft !== "delivery" && ft !== "delivery_mozo")
+  );
+}
+
+/** Solo retiro pasando a buscar (modalidad distinta de pedido en mesa). */
+function isRetiroLocalCustomerPickup(order) {
+  if (isPedidoEnMesaSalon(order)) return false;
+  return isLocalPickupOrder(order);
+}
+
+function orderCanBeMarkedDeliveredInAdmin(order) {
+  return isRetiroLocalCustomerPickup(order) || isWaiterDeliveryOrder(order);
 }
 
 function localDateKey(d = new Date()) {
@@ -80,7 +350,25 @@ function localDateKeyEndIso(dateKey) {
 }
 
 export default function AdminApp({ onLogout }) {
-  const [activeTab, setActiveTab] = useState("orders");
+  const session = getSession();
+  const isMaestro = session?.role === "maestro";
+  const isEncargado = session?.role === "encargado";
+  /** Admin completo o Maestro; no encargado (solo pedidos + menú). */
+  const canAccessFullAdminPanel = !isEncargado;
+
+  const [activeTab, setActiveTab] = useState(() =>
+    getSession()?.role === "maestro" ? "maestro" : "orders"
+  );
+
+  useEffect(() => {
+    if (activeTab === "maestro" && !isMaestro) setActiveTab("orders");
+  }, [activeTab, isMaestro]);
+
+  useEffect(() => {
+    if (!isEncargado) return;
+    const hidden = new Set(["settings", "users", "stats", "mesaqr", "stock", "maestro"]);
+    if (hidden.has(activeTab)) setActiveTab("orders");
+  }, [isEncargado, activeTab]);
   const [orders, setOrders] = useState([]);
   const [deliveryUserLabels, setDeliveryUserLabels] = useState({});
   const ORDERS_PAGE_SIZE = 30;
@@ -107,6 +395,7 @@ export default function AdminApp({ onLogout }) {
   const [savingItemId, setSavingItemId] = useState(null);
   const [savingOrderId, setSavingOrderId] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [menuSearchQuery, setMenuSearchQuery] = useState("");
   const [addingItem, setAddingItem] = useState(false);
   const [newItem, setNewItem] = useState({
     name: "",
@@ -130,15 +419,48 @@ export default function AdminApp({ onLogout }) {
     public_name: "",
     address: "",
     delivery_zones: "",
+    /** Cantidad de mesas numeradas (1..N) para pedidos “en mesa” por WhatsApp. */
+    table_count: "12",
     opening_hours: "",
+    opening_days: [...ALL_BUSINESS_HOUR_DAY_VALUES],
+    opening_time_from: "",
+    opening_time_to: "",
     policies: ""
   });
+  /** false = bot solo retiro; ocultar UI de delivery en admin. Por defecto true si la columna aún no existe. */
+  const [deliveryEnabled, setDeliveryEnabled] = useState(true);
+  const [localEnabled, setLocalEnabled] = useState(true);
+  const [mesaEnabled, setMesaEnabled] = useState(true);
+  const [mesaQrEnabled, setMesaQrEnabled] = useState(true);
+  const [waiterFulfillmentSelectorEnabled, setWaiterFulfillmentSelectorEnabled] = useState(false);
+  const [botRuntimeSwitchesVisible, setBotRuntimeSwitchesVisible] = useState(false);
+  /** Master OFF en metadata → bot en silencio total (sin respuesta ni registro). */
+  const [botWhatsappEnabled, setBotWhatsappEnabled] = useState(true);
+  /** Si es false en metadata y el bot está ON → no bloquear fuera de horario. */
+  const [botEnforceOpeningHours, setBotEnforceOpeningHours] = useState(true);
+  const [restaurantMetadata, setRestaurantMetadata] = useState({});
+  const [cashEnabled, setCashEnabled] = useState(true);
+  const [mercadoPagoEnabled, setMercadoPagoEnabled] = useState(true);
+  const [statsEnabled, setStatsEnabled] = useState(true);
+  const [stockPanelEnabled, setStockPanelEnabled] = useState(true);
   const [loadingConfig, setLoadingConfig] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [configFlash, setConfigFlash] = useState("");
   const [confirmDialog, setConfirmDialog] = useState(null);
   const confirmResolverRef = useRef(null);
   const ordersCalendarDayRef = useRef(localDateKey());
+
+  useEffect(() => {
+    if (activeTab === "stats" && !statsEnabled) setActiveTab("orders");
+  }, [activeTab, statsEnabled]);
+
+  useEffect(() => {
+    if (activeTab === "mesaqr" && !mesaQrEnabled) setActiveTab("orders");
+  }, [activeTab, mesaQrEnabled]);
+
+  useEffect(() => {
+    if (activeTab === "stock" && !stockPanelEnabled) setActiveTab("orders");
+  }, [activeTab, stockPanelEnabled]);
 
   function requestConfirm({
     title = "Confirmar acción",
@@ -167,6 +489,36 @@ export default function AdminApp({ onLogout }) {
       ),
     [orders]
   );
+
+  /** Lista menú A→Z por nombre (tras alta/edición local también queda ordenada). */
+  const menuItemsAlphabetical = useMemo(
+    () =>
+      [...menuItems].sort((a, b) =>
+        String(a.name || "").localeCompare(String(b.name || ""), "es", {
+          sensitivity: "base",
+          numeric: true
+        })
+      ),
+    [menuItems]
+  );
+
+  const menuItemsFiltered = useMemo(() => {
+    const raw = String(menuSearchQuery || "").trim().toLowerCase();
+    if (!raw) return menuItemsAlphabetical;
+    const words = raw.split(/\s+/).filter(Boolean);
+    return menuItemsAlphabetical.filter((item) => {
+      const hay = [
+        item.name,
+        item.category,
+        item.description,
+        item.price != null ? String(item.price) : ""
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return words.every((w) => hay.includes(w));
+    });
+  }, [menuItemsAlphabetical, menuSearchQuery]);
 
   const deliveryIssueCount = useMemo(
     () =>
@@ -330,7 +682,6 @@ export default function AdminApp({ onLogout }) {
       .from("menu_items")
       .select("*")
       .eq("restaurant_id", restaurantId)
-      .order("category", { ascending: true })
       .order("name", { ascending: true });
 
     if (queryError) {
@@ -339,7 +690,12 @@ export default function AdminApp({ onLogout }) {
       return;
     }
 
-    setMenuItems(data || []);
+    setMenuItems(
+      (data || []).map((item) => ({
+        ...item,
+        category: normalizeMenuCategoryForStorage(item.category)
+      }))
+    );
     setLoadingMenu(false);
   }
 
@@ -349,7 +705,9 @@ export default function AdminApp({ onLogout }) {
     setLoadingConfig(true);
     const { data, error: queryError } = await supabase
       .from("restaurants")
-      .select("name, public_name, address, delivery_zones, opening_hours, policies")
+      .select(
+        "name, public_name, address, delivery_zones, delivery_enabled, local_enabled, mesa_enabled, cash_enabled, mercadopago_enabled, stats_enabled, table_count, opening_hours, policies, metadata"
+      )
       .eq("id", rid)
       .maybeSingle();
 
@@ -369,66 +727,272 @@ export default function AdminApp({ onLogout }) {
         : data.policies
           ? JSON.stringify(data.policies, null, 2)
           : "";
+    const metadataObj =
+      data.metadata && typeof data.metadata === "object" && !Array.isArray(data.metadata)
+        ? data.metadata
+        : {};
+    const businessHoursState = resolveBusinessHoursFormState(data.opening_hours || "", metadataObj);
 
     setRestaurantConfig({
       name: data.name || "",
       public_name: data.public_name || "",
       address: data.address || "",
       delivery_zones: data.delivery_zones || "",
+      table_count:
+        data.table_count != null && data.table_count !== ""
+          ? String(data.table_count)
+          : "12",
       opening_hours: data.opening_hours || "",
+      opening_days: businessHoursState.openDays,
+      opening_time_from: businessHoursState.openTime,
+      opening_time_to: businessHoursState.closeTime,
       policies: policiesAsText
     });
+
+    setDeliveryEnabled(data.delivery_enabled !== false);
+    setLocalEnabled(data.local_enabled !== false);
+    setMesaEnabled(data.mesa_enabled !== false);
+    setRestaurantMetadata(metadataObj);
+    setMesaQrEnabled(metadataObj.mesa_qr_enabled !== false);
+    setWaiterFulfillmentSelectorEnabled(metadataObj.waiter_fulfillment_selector_enabled === true);
+    setBotRuntimeSwitchesVisible(metadataObj.bot_runtime_switches_visible === true);
+    setBotWhatsappEnabled(metadataObj.bot_whatsapp_enabled !== false);
+    setBotEnforceOpeningHours(metadataObj.bot_enforce_opening_hours !== false);
+    setCashEnabled(data.cash_enabled !== false);
+    setMercadoPagoEnabled(data.mercadopago_enabled !== false);
+    setStatsEnabled(data.stats_enabled !== false);
+    setStockPanelEnabled(metadataObj.stock_panel_enabled !== false);
     setLoadingConfig(false);
   }
 
   async function saveRestaurantConfig(event) {
     if (event?.preventDefault) event.preventDefault();
-    if (!restaurantId) return;
+    if (!restaurantId) {
+      setError(
+        "No hay restaurante seleccionado. Verificá BOT_WHATSAPP_NUMBER o VITE_BOT_WHATSAPP_NUMBER (.env) para que coincida con restaurants.whatsapp_number (solo dígitos o mismo formato), o que exista al menos una fila en restaurants."
+      );
+      return;
+    }
     setError("");
     setConfigFlash("");
     setSavingConfig(true);
 
-    const patch = {
-      name: restaurantConfig.name.trim() || null,
-      public_name: restaurantConfig.public_name.trim() || null,
-      address: restaurantConfig.address.trim() || null,
-      delivery_zones: restaurantConfig.delivery_zones.trim() || null,
-      opening_hours: restaurantConfig.opening_hours.trim() || null,
-      policies: restaurantConfig.policies.trim() || null
-    };
-
-    const { data, error: updateError } = await supabase
-      .from("restaurants")
-      .update(patch)
-      .eq("id", restaurantId)
-      .select("name, public_name, address, delivery_zones, opening_hours, policies")
-      .maybeSingle();
-
-    if (updateError) {
-      setError(`Error guardando configuración: ${updateError.message}`);
+    const nameTrimmed = restaurantConfig.name.trim();
+    if (!nameTrimmed) {
+      setError("El nombre interno es obligatorio (columna name en la base de datos).");
       setSavingConfig(false);
       return;
     }
-    if (data) {
-      const policiesAsText =
-        typeof data.policies === "string"
-          ? data.policies
-          : data.policies
-            ? JSON.stringify(data.policies, null, 2)
-            : "";
-      setRestaurantConfig({
-        name: data.name || "",
-        public_name: data.public_name || "",
-        address: data.address || "",
-        delivery_zones: data.delivery_zones || "",
-        opening_hours: data.opening_hours || "",
-        policies: policiesAsText
-      });
-      if (data.name) setRestaurantName(data.name);
+
+    const tcRaw = parseInt(String(restaurantConfig.table_count || "").trim(), 10);
+    const tableCountDb =
+      Number.isFinite(tcRaw) && tcRaw >= 1 && tcRaw <= 500 ? tcRaw : 12;
+    const openingDays = normalizeBusinessOpenDays(restaurantConfig.opening_days);
+    const openingTimeFrom = normalizeBusinessHourValue(restaurantConfig.opening_time_from);
+    const openingTimeTo = normalizeBusinessHourValue(restaurantConfig.opening_time_to);
+    const hasBusinessHoursInput =
+      openingDays.length !== ALL_BUSINESS_HOUR_DAY_VALUES.length || openingTimeFrom || openingTimeTo;
+    const canBuildBusinessHours =
+      openingDays.length > 0 &&
+      isValidBusinessHourValue(openingTimeFrom) &&
+      isValidBusinessHourValue(openingTimeTo);
+
+    if (hasBusinessHoursInput && !canBuildBusinessHours) {
+      setError("Completá los días de atención y las horas Desde / Hasta en formato HH:MM.");
+      setSavingConfig(false);
+      return;
     }
+
+    const openingHoursText = canBuildBusinessHours
+      ? buildOpeningHoursText(openingDays, openingTimeFrom, openingTimeTo)
+      : restaurantConfig.opening_hours.trim() || null;
+
+    const patch = {
+      name: nameTrimmed,
+      public_name: restaurantConfig.public_name.trim() || null,
+      address: restaurantConfig.address.trim() || null,
+      delivery_zones: restaurantConfig.delivery_zones.trim() || null,
+      table_count: tableCountDb,
+      opening_hours: openingHoursText,
+      policies: restaurantConfig.policies.trim() || null
+    };
+
+    const metadataBase =
+      restaurantMetadata && typeof restaurantMetadata === "object" && !Array.isArray(restaurantMetadata)
+        ? restaurantMetadata
+        : {};
+    const nextMetadata = {
+      ...metadataBase,
+      bot_runtime_switches_visible: Boolean(botRuntimeSwitchesVisible),
+      bot_whatsapp_enabled: Boolean(botWhatsappEnabled),
+      bot_enforce_opening_hours: Boolean(botEnforceOpeningHours),
+      business_hours: canBuildBusinessHours
+        ? {
+            open_days: openingDays,
+            open_time: openingTimeFrom,
+            close_time: openingTimeTo
+          }
+        : metadataBase.business_hours ?? null
+    };
+
+    // `.single()` obliga error cuando UPDATE no devuelve exactamente 1 fila (0 por RLS, UUID mal, etc.).
+    const { data, error: updateError } = await supabase
+      .from("restaurants")
+      .update({ ...patch, metadata: nextMetadata })
+      .eq("id", restaurantId)
+      .select("name, public_name, address, delivery_zones, table_count, opening_hours, policies")
+      .single();
+
+    if (updateError) {
+      const msg = updateError.message || "";
+      const code = updateError.code || "";
+      const combined = `${msg} ${code}`;
+      let hint = "";
+      if (
+        /row-level security|RLS|42501|permission denied|PGRST116|JSON object requested|No rows|0 rows/i.test(
+          combined
+        )
+      ) {
+        hint =
+          " Ejecutá en Supabase → SQL: dashboard/sql/rls_policies_restobot.sql y dashboard/sql/restaurants_config_columns.sql. Si ya aplicaste RLS, ejecutá dashboard/sql/grants_api_roles_restobot.sql (permisos anon/authenticated).";
+      } else if (/42703|column/i.test(combined)) {
+        hint = " Falta una columna en restaurants (ej. public_name). Ejecutá dashboard/sql/restaurants_config_columns.sql.";
+      } else if (/invalid.*json|jsonb|22P02/i.test(combined)) {
+        hint =
+          " El campo políticas no coincide con el tipo en la base (text vs jsonb). Ajustá el tipo de restaurants.policies o el contenido.";
+      }
+      setError(`Error guardando configuración: ${msg}${hint}`);
+      setSavingConfig(false);
+      return;
+    }
+
+    if (!data) {
+      setError(
+        "No se guardó la configuración (sin fila devuelta). Revisá RLS y permisos: dashboard/sql/rls_policies_restobot.sql y dashboard/sql/grants_api_roles_restobot.sql."
+      );
+      setSavingConfig(false);
+      return;
+    }
+
+    const policiesAsText =
+      typeof data.policies === "string"
+        ? data.policies
+        : data.policies
+          ? JSON.stringify(data.policies, null, 2)
+          : "";
+    setRestaurantConfig({
+      name: data.name || "",
+      public_name: data.public_name || "",
+      address: data.address || "",
+      delivery_zones: data.delivery_zones || "",
+      table_count:
+        data.table_count != null && data.table_count !== ""
+          ? String(data.table_count)
+          : "12",
+      opening_hours: data.opening_hours || openingHoursText || "",
+      opening_days: canBuildBusinessHours ? openingDays : restaurantConfig.opening_days,
+      opening_time_from: canBuildBusinessHours ? openingTimeFrom : restaurantConfig.opening_time_from,
+      opening_time_to: canBuildBusinessHours ? openingTimeTo : restaurantConfig.opening_time_to,
+      policies: policiesAsText
+    });
+    if (data.name) setRestaurantName(data.name);
+    setRestaurantMetadata(nextMetadata);
+
     setConfigFlash("Configuración guardada. Los cambios se aplican en los próximos mensajes al cliente.");
     setSavingConfig(false);
     setTimeout(() => setConfigFlash(""), 6000);
+  }
+
+  async function setMesaQrModuleEnabled(nextEnabled) {
+    if (!restaurantId) {
+      setError("No hay restaurante cargado.");
+      return { ok: false };
+    }
+    setError("");
+    const nextMetadata = {
+      ...(restaurantMetadata && typeof restaurantMetadata === "object" ? restaurantMetadata : {}),
+      mesa_qr_enabled: Boolean(nextEnabled)
+    };
+    const { error: updateError } = await supabase
+      .from("restaurants")
+      .update({ metadata: nextMetadata })
+      .eq("id", restaurantId);
+    if (updateError) {
+      setError(`No se pudo guardar módulo Carta y QR mesas: ${updateError.message}`);
+      return { ok: false, error: updateError };
+    }
+    setRestaurantMetadata(nextMetadata);
+    setMesaQrEnabled(Boolean(nextEnabled));
+    return { ok: true };
+  }
+
+  async function setWaiterFulfillmentSelectorFlag(nextEnabled) {
+    if (!restaurantId) {
+      setError("No hay restaurante cargado.");
+      return { ok: false };
+    }
+    setError("");
+    const nextMetadata = {
+      ...(restaurantMetadata && typeof restaurantMetadata === "object" ? restaurantMetadata : {}),
+      waiter_fulfillment_selector_enabled: Boolean(nextEnabled)
+    };
+    const { error: updateError } = await supabase
+      .from("restaurants")
+      .update({ metadata: nextMetadata })
+      .eq("id", restaurantId);
+    if (updateError) {
+      setError(`No se pudo guardar selector modalidad mozo: ${updateError.message}`);
+      return { ok: false, error: updateError };
+    }
+    setRestaurantMetadata(nextMetadata);
+    setWaiterFulfillmentSelectorEnabled(Boolean(nextEnabled));
+    return { ok: true };
+  }
+
+  async function setBotRuntimeSwitchesVisibleFlag(nextEnabled) {
+    if (!restaurantId) {
+      setError("No hay restaurante cargado.");
+      return { ok: false };
+    }
+    setError("");
+    const nextMetadata = {
+      ...(restaurantMetadata && typeof restaurantMetadata === "object" ? restaurantMetadata : {}),
+      bot_runtime_switches_visible: Boolean(nextEnabled)
+    };
+    const { error: updateError } = await supabase
+      .from("restaurants")
+      .update({ metadata: nextMetadata })
+      .eq("id", restaurantId);
+    if (updateError) {
+      setError(`No se pudo guardar visibilidad de controles Bot/Horario: ${updateError.message}`);
+      return { ok: false, error: updateError };
+    }
+    setRestaurantMetadata(nextMetadata);
+    setBotRuntimeSwitchesVisible(Boolean(nextEnabled));
+    return { ok: true };
+  }
+
+  async function setStockPanelEnabledFlag(nextEnabled) {
+    if (!restaurantId) {
+      setError("No hay restaurante cargado.");
+      return { ok: false };
+    }
+    setError("");
+    const nextMetadata = {
+      ...(restaurantMetadata && typeof restaurantMetadata === "object" ? restaurantMetadata : {}),
+      stock_panel_enabled: Boolean(nextEnabled)
+    };
+    const { error: updateError } = await supabase
+      .from("restaurants")
+      .update({ metadata: nextMetadata })
+      .eq("id", restaurantId);
+    if (updateError) {
+      setError(`No se pudo guardar Gestor de stock: ${updateError.message}`);
+      return { ok: false, error: updateError };
+    }
+    setRestaurantMetadata(nextMetadata);
+    setStockPanelEnabled(Boolean(nextEnabled));
+    return { ok: true };
   }
 
   async function updateOrderStatus(orderId, nextStatus) {
@@ -453,18 +1017,25 @@ export default function AdminApp({ onLogout }) {
       setError("Solo los pedidos en efectivo se confirman manualmente desde este panel.");
       return;
     }
+    if (normalizeOrderStatus(order) === "cancelled") {
+      setError("No se puede confirmar el pago de un pedido cancelado.");
+      return;
+    }
     setError("");
     setSavingOrderId(order.id);
     const paidAtIso = new Date().toISOString();
     const patch = {
-      status: "confirmed",
       payment_status: "paid",
       payment_paid_at: paidAtIso
     };
+    if (normalizeOrderStatus(order) !== "delivered") {
+      patch.status = "confirmed";
+    }
     const { data: updatedRow, error: updateError } = await supabase
       .from("orders")
       .update(patch)
       .eq("id", order.id)
+      .neq("status", "cancelled")
       .select("*")
       .maybeSingle();
 
@@ -487,11 +1058,11 @@ export default function AdminApp({ onLogout }) {
 
   async function requestPickupReadyNotify(order) {
     const st = normalizeOrderStatus(order);
-    if (st !== "confirmed") {
-      setError('Solo pedidos confirmados (pagados) pueden avisar “listo para retiro”.');
+    if (st === "cancelled" || st === "delivered") {
+      setError("No se puede avisar retiro en pedidos cerrados.");
       return;
     }
-    if (!fulfillmentIsPickup(order)) {
+    if (!isRetiroLocalCustomerPickup(order)) {
       setError("Este aviso solo aplica a pedidos de retiro en el local.");
       return;
     }
@@ -583,6 +1154,14 @@ export default function AdminApp({ onLogout }) {
   }
 
   async function markDelivered(order) {
+    if (isPedidoEnMesaSalon(order)) {
+      setError("La acción entregar no aplica a pedidos en mesa.");
+      return;
+    }
+    if (!orderCanBeMarkedDeliveredInAdmin(order)) {
+      setError("La entrega manual solo aplica a retiro local o delivery mozo.");
+      return;
+    }
     const st = normalizeOrderStatus(order);
     if (st === "delivered" || st === "cancelled") {
       setError("Este pedido ya está cerrado.");
@@ -1046,15 +1625,7 @@ export default function AdminApp({ onLogout }) {
 
   useEffect(() => {
     async function loadRestaurant() {
-      const configuredBotNumber = (import.meta.env.VITE_BOT_WHATSAPP_NUMBER || "").replace(/\D/g, "");
-      let query = supabase.from("restaurants").select("id, name, whatsapp_number");
-      if (configuredBotNumber) {
-        query = query.eq("whatsapp_number", configuredBotNumber);
-      } else {
-        query = query.limit(1);
-      }
-
-      const { data, error: restaurantError } = await query.maybeSingle();
+      const { data, error: restaurantError } = await fetchRestaurantForDashboard(supabase);
       if (restaurantError) {
         setError(`Error resolviendo restaurante: ${restaurantError.message}`);
         return;
@@ -1178,14 +1749,18 @@ export default function AdminApp({ onLogout }) {
 
   async function updateMenuItem(itemId, values) {
     setSavingItemId(itemId);
-    const { error: updateError } = await supabase.from("menu_items").update(values).eq("id", itemId);
+    const nextValues =
+      Object.prototype.hasOwnProperty.call(values, "category")
+        ? { ...values, category: normalizeMenuCategoryForStorage(values.category) }
+        : values;
+    const { error: updateError } = await supabase.from("menu_items").update(nextValues).eq("id", itemId);
     if (updateError) {
       setError(`Error guardando item: ${updateError.message}`);
       setSavingItemId(null);
       return false;
     }
 
-    setMenuItems((prev) => prev.map((item) => (item.id === itemId ? { ...item, ...values } : item)));
+    setMenuItems((prev) => prev.map((item) => (item.id === itemId ? { ...item, ...nextValues } : item)));
     setSavingItemId(null);
     return true;
   }
@@ -1196,7 +1771,7 @@ export default function AdminApp({ onLogout }) {
     setEditDraft({
       name: item.name || "",
       description: item.description || "",
-      category: item.category || "",
+      category: normalizeMenuCategoryInput(item.category || ""),
       price: item.price != null ? String(item.price) : ""
     });
   }
@@ -1221,7 +1796,7 @@ export default function AdminApp({ onLogout }) {
     const ok = await updateMenuItem(editingItemId, {
       name: editDraft.name.trim(),
       description: editDraft.description.trim() || null,
-      category: editDraft.category.trim() || null,
+      category: normalizeMenuCategoryForStorage(editDraft.category),
       price
     });
     if (ok) cancelEditMenuItem();
@@ -1249,7 +1824,7 @@ export default function AdminApp({ onLogout }) {
       restaurant_id: restaurantId,
       name: newItem.name.trim(),
       description: newItem.description.trim() || null,
-      category: newItem.category.trim() || null,
+      category: normalizeMenuCategoryForStorage(newItem.category),
       price,
       available: true
     };
@@ -1266,7 +1841,10 @@ export default function AdminApp({ onLogout }) {
       return;
     }
 
-    setMenuItems((prev) => [...prev, data]);
+    setMenuItems((prev) => [
+      ...prev,
+      { ...data, category: normalizeMenuCategoryForStorage(data.category) }
+    ]);
     setNewItem({ name: "", description: "", category: "", price: "" });
     setShowAddForm(false);
     setAddingItem(false);
@@ -1291,7 +1869,11 @@ export default function AdminApp({ onLogout }) {
         <header className="mb-6 flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold">RestoBot · Panel</h1>
-            <p className="text-sm text-slate-400">Gestion de pedidos y menu en tiempo real</p>
+            <p className="text-sm text-slate-400">
+              {isEncargado
+                ? "Encargado · pedidos y carta (sin configuración ni usuarios)"
+                : "Gestion de pedidos y menu en tiempo real"}
+            </p>
             {restaurantName ? (
               <p className="mt-1 text-xs text-slate-500">Restaurante activo: {restaurantName}</p>
             ) : null}
@@ -1335,39 +1917,84 @@ export default function AdminApp({ onLogout }) {
           >
             Gestor de Menu
           </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("stats")}
-            className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
-              activeTab === "stats"
-                ? "bg-emerald-500 text-slate-950"
-                : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
-            }`}
-          >
-            Estadísticas
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("users")}
-            className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
-              activeTab === "users"
-                ? "bg-emerald-500 text-slate-950"
-                : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
-            }`}
-          >
-            Usuarios
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("settings")}
-            className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
-              activeTab === "settings"
-                ? "bg-emerald-500 text-slate-950"
-                : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
-            }`}
-          >
-            Configuración
-          </button>
+          {canAccessFullAdminPanel && mesaQrEnabled ? (
+            <button
+              type="button"
+              onClick={() => setActiveTab("mesaqr")}
+              className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                activeTab === "mesaqr"
+                  ? "bg-emerald-500 text-slate-950"
+                  : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
+              }`}
+            >
+              Carta y QR Mesas
+            </button>
+          ) : null}
+          {canAccessFullAdminPanel && stockPanelEnabled ? (
+            <button
+              type="button"
+              onClick={() => setActiveTab("stock")}
+              className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                activeTab === "stock"
+                  ? "bg-emerald-500 text-slate-950"
+                  : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
+              }`}
+            >
+              Gestor de stock
+            </button>
+          ) : null}
+          {canAccessFullAdminPanel && statsEnabled ? (
+            <button
+              type="button"
+              onClick={() => setActiveTab("stats")}
+              className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                activeTab === "stats"
+                  ? "bg-emerald-500 text-slate-950"
+                  : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
+              }`}
+            >
+              Estadísticas
+            </button>
+          ) : null}
+          {canAccessFullAdminPanel ? (
+            <button
+              type="button"
+              onClick={() => setActiveTab("users")}
+              className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                activeTab === "users"
+                  ? "bg-emerald-500 text-slate-950"
+                  : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
+              }`}
+            >
+              Usuarios
+            </button>
+          ) : null}
+          {canAccessFullAdminPanel ? (
+            <button
+              type="button"
+              onClick={() => setActiveTab("settings")}
+              className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                activeTab === "settings"
+                  ? "bg-emerald-500 text-slate-950"
+                  : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
+              }`}
+            >
+              Configuración
+            </button>
+          ) : null}
+          {isMaestro ? (
+            <button
+              type="button"
+              onClick={() => setActiveTab("maestro")}
+              className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                activeTab === "maestro"
+                  ? "bg-violet-500 text-slate-950"
+                  : "border border-violet-700/60 bg-violet-950/50 text-violet-100 hover:bg-violet-900/60"
+              }`}
+            >
+              Maestro
+            </button>
+          ) : null}
         </div>
 
         {error ? (
@@ -1385,6 +2012,7 @@ export default function AdminApp({ onLogout }) {
               onReset={resetOrderFilters}
               total={ordersTotal}
               shown={orders.length}
+              deliveryEnabled={deliveryEnabled}
             />
 
             {hiddenUpdatesCount > 0 ? (
@@ -1410,7 +2038,7 @@ export default function AdminApp({ onLogout }) {
               </div>
             ) : null}
 
-            {deliveryIssueCount > 0 ? (
+            {deliveryEnabled && deliveryIssueCount > 0 ? (
               <div
                 className="flex flex-wrap items-start gap-3 rounded-xl border-2 border-rose-500 bg-gradient-to-r from-rose-950 via-rose-900/95 to-rose-950 px-4 py-4 shadow-lg shadow-rose-950/50 ring-2 ring-rose-500/40"
                 role="alert"
@@ -1460,7 +2088,7 @@ export default function AdminApp({ onLogout }) {
                       : "border border-slate-700"
                   }`}
                 >
-                  {deliveryIssueAlertOpen ? (
+                  {deliveryEnabled && deliveryIssueAlertOpen ? (
                     <div
                       className="mb-4 flex flex-col gap-3 rounded-lg border-2 border-rose-400/70 bg-rose-600/20 p-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4"
                       role="alert"
@@ -1541,25 +2169,33 @@ export default function AdminApp({ onLogout }) {
                         <span className="text-slate-500">Cliente:</span>{" "}
                         <span className="break-all text-slate-200">{order.customer_number || "—"}</span>
                       </p>
-                      <p className="mt-1">
-                        <span className="text-slate-500">Cliente nro:</span>{" "}
-                        <span className="tabular-nums text-slate-200">
-                          {(() => {
-                            const digits = callableCustomerPhone(order);
-                            if (digits) return formatPhoneLabel(digits);
-                            return "—";
-                          })()}
-                        </span>
-                      </p>
+                      {adminShowClienteNroRow(order) ? (
+                        <p className="mt-1">
+                          <span className="text-slate-500">Cliente nro:</span>{" "}
+                          <span className="tabular-nums text-slate-200">
+                            {(() => {
+                              const digits = callableCustomerPhone(order);
+                              if (digits) return formatPhoneLabel(digits);
+                              return "—";
+                            })()}
+                          </span>
+                        </p>
+                      ) : null}
                     </div>
                     <p>
                       <span className="text-slate-500">Metodo pago:</span> {order.payment_method || "-"}
                     </p>
                     <p>
                       <span className="text-slate-500">Modalidad:</span>{" "}
-                      {order.fulfillment_type === "local"
-                        ? "Retiro local"
-                        : order.fulfillment_type || (order.address ? "delivery" : "-")}
+                      {isWaiterDeliveryOrder(order)
+                        ? "Delivery mozo"
+                        : fulfillmentIsDelivery(order)
+                        ? "Delivery"
+                        : orderFromWaiterPanelNotes(order) || order.fulfillment_type === "mesa"
+                        ? "Pedido en mesa"
+                        : order.fulfillment_type === "local"
+                          ? "Retiro local"
+                          : order.fulfillment_type || (order.address ? "delivery" : "-")}
                     </p>
                     <p>
                       <span className="text-slate-500">Estado pago:</span>{" "}
@@ -1588,6 +2224,12 @@ export default function AdminApp({ onLogout }) {
                     <p>
                       <span className="text-slate-500">Direccion:</span> {order.address || "-"}
                     </p>
+                    {order.scheduled_delivery_at ? (
+                      <p>
+                        <span className="text-slate-500">Horario delivery:</span>{" "}
+                        {formatPaidAt(order.scheduled_delivery_at) || "-"}
+                      </p>
+                    ) : null}
                     {order.payment_link ? (
                       <p className="md:col-span-2 break-all">
                         <span className="text-slate-500">Link MP:</span>{" "}
@@ -1615,7 +2257,7 @@ export default function AdminApp({ onLogout }) {
                       <span className="text-slate-500">Notas:</span>{" "}
                       {adminDashboardNotesBlock(order) || "-"}
                     </p>
-                    {shouldShowDeliveryRepartoSection(order) ? (
+                    {deliveryEnabled && shouldShowDeliveryRepartoSection(order) ? (
                       <div
                         className={`md:col-span-2 rounded-lg border px-3 py-2.5 text-sm ${
                           order.delivery_claimed_by_user_id
@@ -1668,13 +2310,13 @@ export default function AdminApp({ onLogout }) {
                         ) : null}
                       </div>
                     ) : null}
-                    {order.delivery_denial_reason ? (
+                    {deliveryEnabled && order.delivery_denial_reason ? (
                       <p className="md:col-span-2 text-sm text-amber-100/90">
                         <span className="text-slate-500">Motivo cancelación delivery:</span>{" "}
                         {order.delivery_denial_reason}
                       </p>
                     ) : null}
-                    {order.delivery_issue_reason && order.delivery_issue_acknowledged_at ? (
+                    {deliveryEnabled && order.delivery_issue_reason && order.delivery_issue_acknowledged_at ? (
                       <p className="md:col-span-2 rounded-lg border border-slate-700/80 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">
                         <span className="text-slate-500">Incidencia de reparto (historial):</span>{" "}
                         <span className="text-slate-300">{order.delivery_issue_reason}</span>
@@ -1696,7 +2338,7 @@ export default function AdminApp({ onLogout }) {
                       </p>
                     ) : null}
 
-                    {orderNeedsDeliveryFeeControls(order) ? (
+                    {deliveryEnabled && orderNeedsDeliveryFeeControls(order) ? (
                       <div className="md:col-span-2 space-y-3 rounded-lg border border-orange-500/35 bg-orange-950/20 p-4">
                         <p className="text-sm font-semibold text-orange-200">Esperando costo de envío</p>
                         <p className="text-xs text-slate-400">
@@ -1773,13 +2415,13 @@ export default function AdminApp({ onLogout }) {
                       </div>
                     ) : null}
 
-                    {order.status === "delivery_denied" && !order.customer_notified_at ? (
+                    {deliveryEnabled && order.status === "delivery_denied" && !order.customer_notified_at ? (
                       <div className="md:col-span-2 rounded-lg border border-amber-500/35 bg-amber-950/20 p-3 text-xs text-amber-100">
                         Se está avisando al cliente sobre la cancelación del delivery.
                       </div>
                     ) : null}
 
-                    {order.status === "delivery_denial_notify_failed" ? (
+                    {deliveryEnabled && order.status === "delivery_denial_notify_failed" ? (
                       <div className="md:col-span-2 flex flex-wrap items-center gap-2 rounded-lg border border-rose-500/40 bg-rose-950/25 p-3">
                         <p className="text-xs text-rose-100">
                           No se pudo enviar el aviso de cancelación al cliente. Reintentá o contactá soporte si sigue
@@ -1796,13 +2438,13 @@ export default function AdminApp({ onLogout }) {
                       </div>
                     ) : null}
 
-                    {order.status === "delivery_fee_set" && !order.customer_notified_at ? (
+                    {deliveryEnabled && order.status === "delivery_fee_set" && !order.customer_notified_at ? (
                       <div className="md:col-span-2 rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-3 text-xs text-cyan-100">
                         Costo confirmado. El total se envía al cliente.
                       </div>
                     ) : null}
 
-                    {order.status === "awaiting_delivery_total_confirm" ? (
+                    {deliveryEnabled && order.status === "awaiting_delivery_total_confirm" ? (
                       <div className="md:col-span-2 rounded-lg border border-indigo-500/35 bg-indigo-950/25 p-3 text-xs text-indigo-100">
                         <span className="font-semibold text-indigo-50">Efectivo + delivery:</span> el cliente ya
                         recibió el ticket con el total. Estamos esperando que responda{" "}
@@ -1835,6 +2477,7 @@ export default function AdminApp({ onLogout }) {
                       const paidAtLabel = formatPaidAt(order.payment_paid_at);
                       const status = normalizeOrderStatus(order);
                       const isClosed = status === "delivered" || status === "cancelled";
+                      const canConfirmCash = method === "cash" && !approved && status !== "cancelled";
                       const deliveredAtLabel = formatPaidAt(order.delivered_at);
                       const cancelledAtLabel = formatPaidAt(order.cancelled_at);
 
@@ -1878,12 +2521,23 @@ export default function AdminApp({ onLogout }) {
                             </div>
                           ) : null}
 
+                          {canConfirmCash && status !== "delivered" ? (
+                            <button
+                              type="button"
+                              disabled={savingOrderId === order.id}
+                              onClick={() => confirmCashPayment(order)}
+                              className="rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-1 text-xs text-blue-300"
+                            >
+                              Confirmar pago efectivo
+                            </button>
+                          ) : null}
+
                           {status === "delivered" ? (
                             <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
                               <span>
                                 <span className="font-semibold">Pedido entregado</span>
                                 {deliveredAtLabel ? ` · ${deliveredAtLabel}` : ""}
-                                {isDeliveryOrder(order) && order.delivery_claimed_by_user_id ? (
+                                {deliveryEnabled && isDeliveryOrder(order) && order.delivery_claimed_by_user_id ? (
                                   <span className="mt-0.5 block text-[11px] text-emerald-100/85">
                                     Repartidor:{" "}
                                     <span className="font-medium text-emerald-50">
@@ -1893,22 +2547,34 @@ export default function AdminApp({ onLogout }) {
                                   </span>
                                 ) : null}
                               </span>
-                              <button
-                                type="button"
-                                disabled={savingOrderId === order.id}
-                                onClick={() => revertClosedOrder(order, "delivered")}
-                                className="rounded-md border border-amber-400/50 bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-200 hover:bg-amber-500/25 disabled:opacity-50"
-                                title="Volver el pedido al estado activo previo"
-                              >
-                                Revertir entrega
-                              </button>
+                              <div className="flex flex-wrap gap-2">
+                                {canConfirmCash ? (
+                                  <button
+                                    type="button"
+                                    disabled={savingOrderId === order.id}
+                                    onClick={() => confirmCashPayment(order)}
+                                    className="rounded-md border border-blue-400/50 bg-blue-500/15 px-2 py-0.5 text-[11px] font-medium text-blue-200 hover:bg-blue-500/25 disabled:opacity-50"
+                                  >
+                                    Confirmar pago efectivo
+                                  </button>
+                                ) : null}
+                                <button
+                                  type="button"
+                                  disabled={savingOrderId === order.id}
+                                  onClick={() => revertClosedOrder(order, "delivered")}
+                                  className="rounded-md border border-amber-400/50 bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-200 hover:bg-amber-500/25 disabled:opacity-50"
+                                  title="Volver el pedido al estado activo previo"
+                                >
+                                  Revertir entrega
+                                </button>
+                              </div>
                             </div>
                           ) : status === "cancelled" ? (
                             <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
                               <span>
                                 <span className="font-semibold">Pedido cancelado</span>
                                 {cancelledAtLabel ? ` · ${cancelledAtLabel}` : ""}
-                                {isDeliveryOrder(order) && order.delivery_claimed_by_user_id ? (
+                                {deliveryEnabled && isDeliveryOrder(order) && order.delivery_claimed_by_user_id ? (
                                   <span className="mt-0.5 block text-[11px] text-rose-100/85">
                                     Había tomado el pedido:{" "}
                                     <span className="font-medium text-rose-50">
@@ -1932,17 +2598,7 @@ export default function AdminApp({ onLogout }) {
                             </div>
                           ) : (
                             <div className="flex flex-wrap gap-2">
-                              {method === "cash" && !approved && !isDeliveryOrder(order) ? (
-                                <button
-                                  type="button"
-                                  disabled={savingOrderId === order.id}
-                                  onClick={() => confirmCashPayment(order)}
-                                  className="rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-1 text-xs text-blue-300"
-                                >
-                                  Confirmar pago efectivo
-                                </button>
-                              ) : null}
-                              {adminShowNotifyDeliveriesReadyButton(order) ? (
+                              {deliveryEnabled && adminShowNotifyDeliveriesReadyButton(order) ? (
                                 <button
                                   type="button"
                                   disabled={savingOrderId === order.id}
@@ -1953,7 +2609,7 @@ export default function AdminApp({ onLogout }) {
                                   Avisar repartidores: pedido listo
                                 </button>
                               ) : null}
-                              {isDeliveryOrder(order) && order.delivery_ready_broadcast_at ? (
+                              {deliveryEnabled && isDeliveryOrder(order) && order.delivery_ready_broadcast_at ? (
                                 <span className="text-[11px] text-amber-200/90">
                                   Repartidores avisados
                                   {formatPaidAt(order.delivery_ready_broadcast_at)
@@ -1961,7 +2617,7 @@ export default function AdminApp({ onLogout }) {
                                     : ""}
                                 </span>
                               ) : null}
-                              {isDeliveryOrder(order) && order.delivery_claimed_by_user_id ? (
+                              {deliveryEnabled && isDeliveryOrder(order) && order.delivery_claimed_by_user_id ? (
                                 <span className="text-[11px] text-emerald-200/90">
                                   Toma el pedido:{" "}
                                   <span className="font-medium text-emerald-100">
@@ -1973,7 +2629,9 @@ export default function AdminApp({ onLogout }) {
                                     : ""}
                                 </span>
                               ) : null}
-                              {isDeliveryOrder(order) && order.delivery_en_route_customer_notified_at ? (
+                              {deliveryEnabled &&
+                              isDeliveryOrder(order) &&
+                              order.delivery_en_route_customer_notified_at ? (
                                 <span className="text-[11px] font-medium text-sky-200/95">
                                   Cliente avisado (repartidor en camino)
                                   {formatPaidAt(order.delivery_en_route_customer_notified_at)
@@ -1981,9 +2639,7 @@ export default function AdminApp({ onLogout }) {
                                     : ""}
                                 </span>
                               ) : null}
-                              {fulfillmentIsPickup(order) &&
-                              status === "confirmed" &&
-                              approved &&
+                              {isRetiroLocalCustomerPickup(order) &&
                               !order.pickup_ready_customer_notified_at ? (
                                 <button
                                   type="button"
@@ -1995,14 +2651,14 @@ export default function AdminApp({ onLogout }) {
                                   Avisar: listo para retiro
                                 </button>
                               ) : null}
-                              {fulfillmentIsPickup(order) &&
+                              {isRetiroLocalCustomerPickup(order) &&
                               order.pickup_ready_notify_requested_at &&
                               !order.pickup_ready_customer_notified_at ? (
                                 <span className="text-[11px] text-slate-400">
                                   Enviando aviso al cliente…
                                 </span>
                               ) : null}
-                              {fulfillmentIsPickup(order) && order.pickup_ready_customer_notified_at ? (
+                              {isRetiroLocalCustomerPickup(order) && order.pickup_ready_customer_notified_at ? (
                                 <span className="text-[11px] text-emerald-200/80">
                                   Cliente avisado (retiro)
                                   {formatPaidAt(order.pickup_ready_customer_notified_at)
@@ -2010,7 +2666,7 @@ export default function AdminApp({ onLogout }) {
                                     : ""}
                                 </span>
                               ) : null}
-                              {isDeliveryOrder(order) ? null : (
+                              {orderCanBeMarkedDeliveredInAdmin(order) ? (
                                 <button
                                   type="button"
                                   disabled={savingOrderId === order.id}
@@ -2019,7 +2675,7 @@ export default function AdminApp({ onLogout }) {
                                 >
                                   Entregado
                                 </button>
-                              )}
+                              ) : null}
                               <button
                                 type="button"
                                 disabled={savingOrderId === order.id}
@@ -2060,18 +2716,38 @@ export default function AdminApp({ onLogout }) {
           </section>
         ) : activeTab === "menu" ? (
           <section className="space-y-4">
-            <div className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-900 p-4">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-200">Productos del menu</h2>
-                <p className="text-xs text-slate-400">Administra precios, disponibilidad y alta de productos.</p>
+            <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-200">Productos del menu</h2>
+                  <p className="text-xs text-slate-400">Administra precios, disponibilidad y alta de productos.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAddForm((prev) => !prev)}
+                  className="shrink-0 rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950"
+                >
+                  Añadir Producto
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowAddForm((prev) => !prev)}
-                className="rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950"
-              >
-                Añadir Producto
-              </button>
+              <label className="mt-4 block">
+                <span className="sr-only">Buscar productos</span>
+                <input
+                  type="search"
+                  value={menuSearchQuery}
+                  onChange={(e) => setMenuSearchQuery(e.target.value)}
+                  placeholder="Buscar por nombre, categoria, descripcion o precio..."
+                  autoComplete="off"
+                  className="h-10 w-full rounded-lg border border-slate-600 bg-slate-950 px-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-500/50 focus:outline-none focus:ring-1 focus:ring-emerald-500/30"
+                />
+              </label>
+              {menuItems.length > 0 && menuSearchQuery.trim() ? (
+                <p className="mt-2 text-xs text-slate-500">
+                  {menuItemsFiltered.length === menuItemsAlphabetical.length
+                    ? `${menuItemsAlphabetical.length} productos`
+                    : `${menuItemsFiltered.length} de ${menuItemsAlphabetical.length} productos`}
+                </p>
+              ) : null}
             </div>
 
             {showAddForm ? (
@@ -2088,8 +2764,13 @@ export default function AdminApp({ onLogout }) {
                 />
                 <input
                   value={newItem.category}
-                  onChange={(event) => setNewItem((prev) => ({ ...prev, category: event.target.value }))}
-                  placeholder="Categoria"
+                  onChange={(event) =>
+                    setNewItem((prev) => ({
+                      ...prev,
+                      category: normalizeMenuCategoryInput(event.target.value)
+                    }))
+                  }
+                  placeholder="CATEGORIA"
                   className="h-10 rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"
                 />
                 <input
@@ -2132,8 +2813,12 @@ export default function AdminApp({ onLogout }) {
               <div className="rounded-xl border border-slate-700 bg-slate-900 p-5 text-slate-400">
                 Aun no hay items cargados en menu_items.
               </div>
+            ) : menuItemsFiltered.length === 0 ? (
+              <div className="rounded-xl border border-slate-700 bg-slate-900 p-5 text-slate-400">
+                No hay productos que coincidan con &quot;{menuSearchQuery.trim()}&quot;. Probá otra palabra o limpiá el buscador.
+              </div>
             ) : (
-              menuItems.map((item) => (
+              menuItemsFiltered.map((item) => (
                 <article
                   key={item.id}
                   className="rounded-xl border border-slate-700 bg-slate-900 p-5"
@@ -2141,7 +2826,9 @@ export default function AdminApp({ onLogout }) {
                   <div className="flex flex-col gap-4 md:flex-row md:flex-wrap md:items-start md:justify-between">
                     <div className="min-w-0 flex-1">
                       <h3 className="font-semibold text-slate-100">{item.name}</h3>
-                      <p className="text-sm text-slate-400">{item.category || "Sin categoria"}</p>
+                      <p className="text-sm text-slate-400">
+                        {normalizeMenuCategoryForStorage(item.category) || "Sin categoria"}
+                      </p>
                       <p className="mt-1 text-xs text-slate-500">{item.description || "Sin descripcion"}</p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -2205,9 +2892,12 @@ export default function AdminApp({ onLogout }) {
                       <input
                         value={editDraft.category}
                         onChange={(event) =>
-                          setEditDraft((prev) => ({ ...prev, category: event.target.value }))
+                          setEditDraft((prev) => ({
+                            ...prev,
+                            category: normalizeMenuCategoryInput(event.target.value)
+                          }))
                         }
-                        placeholder="Categoria (ej: combos, pizza)"
+                        placeholder="CATEGORIA (ej: COMBOS, PIZZA)"
                         className="h-10 rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"
                       />
                       <input
@@ -2249,10 +2939,56 @@ export default function AdminApp({ onLogout }) {
               ))
             )}
           </section>
-        ) : activeTab === "stats" ? (
+        ) : activeTab === "mesaqr" ? (
+          <section className="space-y-4">
+            <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
+              <h2 className="text-sm font-semibold text-slate-200">Carta y QR Mesas</h2>
+              <p className="text-xs text-slate-400">
+                Administrá enlaces y QR por mesa para la carta web. Este módulo es independiente del flujo de chat.
+              </p>
+            </div>
+            <MesaQrLinksPanel
+              restaurantId={restaurantId}
+              qrModuleEnabled={mesaQrEnabled}
+              restaurantMetadata={restaurantMetadata}
+              onRestaurantMetadataChange={setRestaurantMetadata}
+              tableCount={Math.min(
+                500,
+                Math.max(1, parseInt(String(restaurantConfig.table_count || "12").trim(), 10) || 12)
+              )}
+            />
+          </section>
+        ) : activeTab === "stock" && stockPanelEnabled ? (
+          <StockManagerPanel restaurantId={restaurantId} />
+        ) : activeTab === "stats" && statsEnabled ? (
           <AdminStats restaurantId={restaurantId} />
         ) : activeTab === "users" ? (
           <DashboardUsersPanel />
+        ) : activeTab === "maestro" && isMaestro ? (
+          <MaestroPanel
+            restaurantId={restaurantId}
+            deliveryEnabled={deliveryEnabled}
+            localEnabled={localEnabled}
+            mesaEnabled={mesaEnabled}
+            mesaQrEnabled={mesaQrEnabled}
+            waiterFulfillmentSelectorEnabled={waiterFulfillmentSelectorEnabled}
+            botRuntimeSwitchesVisible={botRuntimeSwitchesVisible}
+            cashEnabled={cashEnabled}
+            mercadoPagoEnabled={mercadoPagoEnabled}
+            statsEnabled={statsEnabled}
+            stockPanelEnabled={stockPanelEnabled}
+            tableCount={Math.min(
+              500,
+              Math.max(1, parseInt(String(restaurantConfig.table_count || "12").trim(), 10) || 12)
+            )}
+            loadingRestaurant={loadingConfig}
+            onServiceFlagsUpdated={() => loadRestaurantConfig(restaurantId)}
+            onTableCountUpdated={() => loadRestaurantConfig(restaurantId)}
+            onMesaQrModuleToggle={setMesaQrModuleEnabled}
+            onWaiterFulfillmentSelectorToggle={setWaiterFulfillmentSelectorFlag}
+            onBotRuntimeSwitchesVisibleToggle={setBotRuntimeSwitchesVisibleFlag}
+            onStockPanelToggle={setStockPanelEnabledFlag}
+          />
         ) : (
           <section className="space-y-4">
             <div className="rounded-xl border border-slate-700 bg-slate-900 p-5">
@@ -2321,42 +3057,228 @@ export default function AdminApp({ onLogout }) {
                   </span>
                 </label>
 
-                <label className="block space-y-1 text-sm">
+                <div className="block space-y-3 text-sm">
                   <span className="text-slate-300">Horario de atención</span>
+                  <div className="rounded-lg border border-slate-700 bg-slate-950/60 p-4 space-y-4">
+                    <div className="space-y-1">
+                      <span className="text-xs font-medium uppercase tracking-wider text-slate-400">
+                        Días de atención
+                      </span>
+                      <WeekdayToggle
+                        value={restaurantConfig.opening_days}
+                        onChange={(days) =>
+                          setRestaurantConfig((prev) => ({
+                            ...prev,
+                            opening_days: days
+                          }))
+                        }
+                        disabled={savingConfig}
+                      />
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="space-y-1">
+                        <span className="text-xs font-medium uppercase tracking-wider text-slate-400">
+                          Desde
+                        </span>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          autoComplete="off"
+                          maxLength={5}
+                          value={restaurantConfig.opening_time_from}
+                          onChange={(event) =>
+                            setRestaurantConfig((prev) => ({
+                              ...prev,
+                              opening_time_from: formatBusinessHourInput(event.target.value)
+                            }))
+                          }
+                          onBlur={(event) =>
+                            setRestaurantConfig((prev) => ({
+                              ...prev,
+                              opening_time_from: normalizeBusinessHourValue(event.target.value)
+                            }))
+                          }
+                          placeholder="HH:MM"
+                          className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"
+                        />
+                      </label>
+                      <label className="space-y-1">
+                        <span className="text-xs font-medium uppercase tracking-wider text-slate-400">
+                          Hasta
+                        </span>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          autoComplete="off"
+                          maxLength={5}
+                          value={restaurantConfig.opening_time_to}
+                          onChange={(event) =>
+                            setRestaurantConfig((prev) => ({
+                              ...prev,
+                              opening_time_to: formatBusinessHourInput(event.target.value)
+                            }))
+                          }
+                          onBlur={(event) =>
+                            setRestaurantConfig((prev) => ({
+                              ...prev,
+                              opening_time_to: normalizeBusinessHourValue(event.target.value)
+                            }))
+                          }
+                          placeholder="HH:MM"
+                          className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"
+                        />
+                      </label>
+                    </div>
+                    <span className="block text-xs text-slate-500">
+                      El bot seguirá en silencio fuera de este horario si el switch
+                      <strong className="text-slate-400"> Respetar horario de atención </strong>
+                      está en ON.
+                    </span>
+                    {buildOpeningHoursText(
+                      restaurantConfig.opening_days,
+                      normalizeBusinessHourValue(restaurantConfig.opening_time_from),
+                      normalizeBusinessHourValue(restaurantConfig.opening_time_to)
+                    ) ? (
+                      <span className="block text-xs text-slate-500">
+                        Resumen:{" "}
+                        <strong className="text-slate-300">
+                          {buildOpeningHoursText(
+                            restaurantConfig.opening_days,
+                            normalizeBusinessHourValue(restaurantConfig.opening_time_from),
+                            normalizeBusinessHourValue(restaurantConfig.opening_time_to)
+                          )}
+                        </strong>
+                      </span>
+                    ) : restaurantConfig.opening_hours ? (
+                      <span className="block text-xs text-amber-300">
+                        Horario actual heredado: {restaurantConfig.opening_hours}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+
+                {botRuntimeSwitchesVisible ? (
+                  <div className="space-y-3 rounded-lg border border-slate-700 bg-slate-950/60 p-4 text-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-slate-200">Bot de WhatsApp</p>
+                        <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                          OFF: silencio total (sin respuestas ni registro de mensajes). ON: el bot funciona según la
+                          configuración de horario de abajo.
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <span
+                          className={`text-xs font-bold uppercase tabular-nums ${
+                            botWhatsappEnabled ? "text-emerald-400" : "text-slate-500"
+                          }`}
+                        >
+                          {botWhatsappEnabled ? "On" : "Off"}
+                        </span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={botWhatsappEnabled}
+                          aria-label={
+                            botWhatsappEnabled ? "Desactivar bot de WhatsApp" : "Activar bot de WhatsApp"
+                          }
+                          onClick={() => setBotWhatsappEnabled((v) => !v)}
+                          className={`relative h-9 w-[3.25rem] shrink-0 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 ${
+                            botWhatsappEnabled ? "bg-emerald-600" : "bg-slate-600"
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-1 h-7 w-7 rounded-full bg-white shadow transition-transform ${
+                              botWhatsappEnabled ? "translate-x-[1.35rem]" : "translate-x-1"
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="border-t border-slate-700/80 pt-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="font-medium text-slate-200">Respetar horario de atención</p>
+                          <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                            Solo aplica con el bot en ON. On: fuera del horario no procesa mensajes (como antes). Off:
+                            responde en cualquier momento; el texto de horario sigue disponible para la IA.
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <span
+                            className={`text-xs font-bold uppercase tabular-nums ${
+                              botEnforceOpeningHours ? "text-emerald-400" : "text-slate-500"
+                            }`}
+                          >
+                            {botEnforceOpeningHours ? "On" : "Off"}
+                          </span>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={botEnforceOpeningHours}
+                            aria-label={
+                              botEnforceOpeningHours
+                                ? "No aplicar cierre por horario"
+                                : "Aplicar cierre por horario"
+                            }
+                            onClick={() => setBotEnforceOpeningHours((v) => !v)}
+                            className={`relative h-9 w-[3.25rem] shrink-0 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 ${
+                              botEnforceOpeningHours ? "bg-emerald-600" : "bg-slate-600"
+                            }`}
+                          >
+                            <span
+                              className={`absolute top-1 h-7 w-7 rounded-full bg-white shadow transition-transform ${
+                                botEnforceOpeningHours ? "translate-x-[1.35rem]" : "translate-x-1"
+                              }`}
+                            />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+
+                <label className="block space-y-1 text-sm md:max-w-xs">
+                  <span className="text-slate-300">Mesas del salón (numeradas)</span>
                   <input
-                    value={restaurantConfig.opening_hours}
+                    type="number"
+                    min={1}
+                    max={500}
+                    inputMode="numeric"
+                    value={restaurantConfig.table_count}
                     onChange={(event) =>
                       setRestaurantConfig((prev) => ({
                         ...prev,
-                        opening_hours: event.target.value
+                        table_count: event.target.value
                       }))
                     }
-                    placeholder="Ej: Lunes a Sábado de 12:00 a 23:30. Domingos cerrado."
                     className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"
                   />
                   <span className="block text-xs text-slate-500">
-                    Texto libre para cuando preguntan por el horario de atención.
+                    El bot solo acepta números de mesa entre 1 y este valor (por defecto 12). Rango permitido 1–500.
                   </span>
                 </label>
 
-                <label className="block space-y-1 text-sm">
-                  <span className="text-slate-300">Zonas de delivery</span>
-                  <textarea
-                    rows={2}
-                    value={restaurantConfig.delivery_zones}
-                    onChange={(event) =>
-                      setRestaurantConfig((prev) => ({
-                        ...prev,
-                        delivery_zones: event.target.value
-                      }))
-                    }
-                    placeholder="Ej: Centro, Godoy Cruz, Las Heras (hasta calle Paso de los Andes)"
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
-                  />
-                  <span className="block text-xs text-slate-500">
-                    Lista o descripción libre de las zonas que cubrís.
-                  </span>
-                </label>
+                {deliveryEnabled ? (
+                  <label className="block space-y-1 text-sm">
+                    <span className="text-slate-300">Zonas de delivery</span>
+                    <textarea
+                      rows={2}
+                      value={restaurantConfig.delivery_zones}
+                      onChange={(event) =>
+                        setRestaurantConfig((prev) => ({
+                          ...prev,
+                          delivery_zones: event.target.value
+                        }))
+                      }
+                      placeholder="Ej: Centro, Godoy Cruz, Las Heras (hasta calle Paso de los Andes)"
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+                    />
+                    <span className="block text-xs text-slate-500">
+                      Lista o descripción libre de las zonas que cubrís.
+                    </span>
+                  </label>
+                ) : null}
 
                 <label className="block space-y-1 text-sm">
                   <span className="text-slate-300">Políticas internas</span>
@@ -2409,7 +3331,15 @@ export default function AdminApp({ onLogout }) {
   );
 }
 
-function OrdersFilterBar({ filters, todayOnly, onApply, onReset, total, shown }) {
+const DELIVERY_PIPELINE_ORDER_STATUSES = [
+  "awaiting_delivery_fee",
+  "delivery_fee_set",
+  "awaiting_delivery_total_confirm",
+  "delivery_denied",
+  "delivery_denial_notify_failed"
+];
+
+function OrdersFilterBar({ filters, todayOnly, onApply, onReset, total, shown, deliveryEnabled = true }) {
   const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState(filters);
   const [draftTodayOnly, setDraftTodayOnly] = useState(todayOnly);
@@ -2422,6 +3352,20 @@ function OrdersFilterBar({ filters, todayOnly, onApply, onReset, total, shown })
     setDraftTodayOnly(todayOnly);
   }, [todayOnly]);
 
+  useEffect(() => {
+    if (deliveryEnabled) return;
+    setDraft((prev) => {
+      let next = prev;
+      if (DELIVERY_PIPELINE_ORDER_STATUSES.includes(prev.status)) {
+        next = { ...next, status: "all" };
+      }
+      if (prev.fulfillmentType === "delivery") {
+        next = { ...next, fulfillmentType: "all" };
+      }
+      return next === prev ? prev : next;
+    });
+  }, [deliveryEnabled]);
+
   function update(key, value) {
     setDraft((prev) => ({ ...prev, [key]: value }));
   }
@@ -2431,7 +3375,7 @@ function OrdersFilterBar({ filters, todayOnly, onApply, onReset, total, shown })
     onApply(draft, draftTodayOnly);
   }
 
-  const STATUS_OPTIONS = [
+  const STATUS_OPTIONS_ALL = [
     { value: "all", label: "Todos" },
     { value: "pending", label: "Pendientes" },
     { value: "awaiting_delivery_fee", label: "Esperando envío" },
@@ -2448,17 +3392,30 @@ function OrdersFilterBar({ filters, todayOnly, onApply, onReset, total, shown })
     { value: "cancelled", label: "Cancelados" }
   ];
 
+  const STATUS_OPTIONS = deliveryEnabled
+    ? STATUS_OPTIONS_ALL
+    : STATUS_OPTIONS_ALL.filter((o) => !DELIVERY_PIPELINE_ORDER_STATUSES.includes(o.value));
+
   const PAYMENT_OPTIONS = [
     { value: "all", label: "Todos" },
     { value: "efectivo", label: "Efectivo" },
     { value: "mercadopago", label: "Mercado Pago" }
   ];
 
-  const FULFILLMENT_OPTIONS = [
-    { value: "all", label: "Todas" },
-    { value: "delivery", label: "Delivery" },
-    { value: "local", label: "Retiro en local" }
-  ];
+  const FULFILLMENT_OPTIONS = deliveryEnabled
+    ? [
+        { value: "all", label: "Todas" },
+        { value: "delivery", label: "Delivery" },
+        { value: "delivery_mozo", label: "Delivery mozo" },
+        { value: "local", label: "Retiro en local" },
+        { value: "mesa", label: "Pedido en mesa" }
+      ]
+    : [
+        { value: "all", label: "Todas" },
+        { value: "delivery_mozo", label: "Delivery mozo" },
+        { value: "local", label: "Retiro en local" },
+        { value: "mesa", label: "Pedido en mesa" }
+      ];
 
   const appliedSummaryParts = [];
   if (todayOnly) {

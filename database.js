@@ -1,4 +1,5 @@
 const { createClient } = require("@supabase/supabase-js");
+const ws = require("ws");
 
 const supabaseUrl = process.env.SUPABASE_URL;
 // Service role bypasses RLS (solo servidor / .env del bot). La clave anon suele chocar con RLS en inserts.
@@ -16,7 +17,10 @@ if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
   );
 }
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = createClient(supabaseUrl, supabaseKey, {
+  // Node.js < 22 no tiene WebSocket global; Realtime de Supabase lo necesita.
+  realtime: { transport: ws }
+});
 
 const TABLES = {
   restaurants: process.env.SUPABASE_RESTAURANTS_TABLE || "restaurants",
@@ -67,7 +71,9 @@ async function getRestaurantByIncomingNumber(toNumber) {
 async function getRestaurantContext(restaurantId) {
   const { data: restaurant, error: restaurantError } = await supabase
     .from(TABLES.restaurants)
-    .select("id, name, public_name, whatsapp_number, opening_hours, address, delivery_zones, policies, metadata")
+    .select(
+      "id, name, public_name, whatsapp_number, opening_hours, address, delivery_zones, delivery_enabled, local_enabled, mesa_enabled, cash_enabled, mercadopago_enabled, table_count, policies, metadata"
+    )
     .eq("id", restaurantId)
     .maybeSingle();
 
@@ -169,7 +175,7 @@ async function saveOrder(payload) {
     items: payload.items || [],
     address: payload.address || null,
     notes: payload.notes || null,
-    status: payload.status || "pending",
+    status: payload.status || "confirmed",
     payment_method: payload.paymentMethod || null,
     payment_status: payload.paymentStatus || null,
     total_price: totalProducts,
@@ -208,6 +214,10 @@ async function saveOrder(payload) {
   if (payload.deliveryTotalConfirmedAt != null) {
     row.delivery_total_confirmed_at = payload.deliveryTotalConfirmedAt;
   }
+  if (payload.tableNumber != null && payload.tableNumber !== "") {
+    const tn = Number(payload.tableNumber);
+    if (Number.isFinite(tn)) row.table_number = tn;
+  }
 
   let { data, error } = await supabase.from(TABLES.orders).insert(row).select("*").single();
   // Si la migracion `customer_phone` todavia no se aplicó en la DB, Postgres
@@ -223,6 +233,13 @@ async function saveOrder(payload) {
   if (error && /delivery_total_confirmed_at/i.test(error.message || "") && "delivery_total_confirmed_at" in row) {
     const fallbackRow = { ...row };
     delete fallbackRow.delivery_total_confirmed_at;
+    const retry = await supabase.from(TABLES.orders).insert(fallbackRow).select("*").single();
+    data = retry.data;
+    error = retry.error;
+  }
+  if (error && /table_number/i.test(error.message || "") && "table_number" in row) {
+    const fallbackRow = { ...row };
+    delete fallbackRow.table_number;
     const retry = await supabase.from(TABLES.orders).insert(fallbackRow).select("*").single();
     data = retry.data;
     error = retry.error;

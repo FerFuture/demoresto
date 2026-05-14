@@ -20,7 +20,7 @@ const LOOKBACK_HOURS = Number(process.env.MP_PAYMENT_LOOKBACK_HOURS || 24);
 const BATCH_LIMIT = Number(process.env.MP_PAYMENT_BATCH_LIMIT || 25);
 /** Máx. filas por ciclo solo para vencimiento de MP pending (evita pedidos efectivo que tapen el lote). */
 const EXPIRE_SCAN_LIMIT = Number(process.env.MP_PAYMENT_EXPIRE_SCAN_LIMIT || 100);
-/** Tiempo máximo en estado pending esperando pago MP (desde link / creación del pedido). Default 15 min; override: MP_PAYMENT_PENDING_TIMEOUT_MS (ms). */
+/** Tiempo máximo esperando pago MP (desde link / creación del pedido; pedido ya puede estar confirmado). Default 15 min; override: MP_PAYMENT_PENDING_TIMEOUT_MS (ms). */
 const MP_PENDING_TIMEOUT_MS = Number(process.env.MP_PAYMENT_PENDING_TIMEOUT_MS || 15 * 60 * 1000);
 const MERCADOPAGO_LINK_MARKERS = ["mercadopago.com", "mercadolibre.com"];
 
@@ -36,9 +36,10 @@ function paymentLinkLooksMercadoPago(url) {
   return MERCADOPAGO_LINK_MARKERS.some((m) => u.includes(m));
 }
 
-/** Pedido que está esperando checkout MP (no efectivo colado). */
+/** Pedido que está esperando checkout MP (no efectivo colado). Estado del pedido confirmado o legacy pending. */
 function isAwaitingMpCheckout(order) {
-  if (String(order?.status || "").trim() !== "pending") return false;
+  const st = String(order?.status || "").trim();
+  if (st !== "pending" && st !== "confirmed") return false;
   const ps = String(order?.payment_status ?? "").trim().toLowerCase();
   if (ps === "approved" || ps === "paid") return false;
   if (isMpMethod(order?.payment_method)) return true;
@@ -129,17 +130,19 @@ function buildMpPaymentExpiredMessage() {
 }
 
 /**
- * Cancela solo si sigue pending y payment_status es null o pending.
+ * Cancela solo si sigue en el mismo status (pending legacy o confirmed) y payment_status es null o pending.
  * Dos updates evitan ambigüedad del operador or() encadenado con eq() en PostgREST.
  */
-async function cancelPendingMpOrderByTimeout(orderId) {
+async function cancelPendingMpOrderByTimeout(order) {
+  const orderId = order.id;
+  const statusAtCancel = String(order.status || "").trim();
   const patch = {
     status: "cancelled",
     payment_status: "cancelled",
     cancelled_at: new Date().toISOString()
   };
   const base = () =>
-    supabase.from(TABLES.orders).update(patch).eq("id", orderId).eq("status", "pending");
+    supabase.from(TABLES.orders).update(patch).eq("id", orderId).eq("status", statusAtCancel);
 
   let { data, error } = await base().is("payment_status", null).select("*").maybeSingle();
   if (error) throw new Error(error.message);
@@ -155,7 +158,7 @@ async function maybeAutoCancelExpiredMpOrder(order, whatsappClient) {
 
   let updated;
   try {
-    updated = await cancelPendingMpOrderByTimeout(order.id);
+    updated = await cancelPendingMpOrderByTimeout(order);
   } catch (err) {
     console.error("[mp-poll] Error DB cancelando por timeout", order.id, err?.message || err);
     return false;
@@ -216,6 +219,12 @@ function buildPaymentReceivedMessage(order, payment) {
   const ft = String(order?.fulfillment_type ?? "").trim().toLowerCase();
   if (ft === "local") {
     lines.push("Te avisamos por acá cuando esté *listo para retirar* en el local.");
+  }
+  if (ft === "mesa") {
+    const tn = order?.table_number;
+    const mesaTxt =
+      tn != null && tn !== "" && Number.isFinite(Number(tn)) ? `mesa ${Number(tn)}` : "tu mesa";
+    lines.push(`Cuando esté listo, te lo llevan a la *${mesaTxt}*.`);
   }
   return lines.join("\n");
 }
@@ -291,8 +300,8 @@ async function processOrder(order, whatsappClient) {
 }
 
 /**
- * Vencimiento de pedidos MP en pending.
- * Consultas simples (.eq) + unión en JS: evita filtros anidados and/or/ilike que PostgREST a veces rechaza o interpreta mal.
+ * Vencimiento de pedidos MP sin pago (status pending legacy o confirmed).
+ * Consultas simples (.in) + unión en JS: evita filtros anidados and/or/ilike que PostgREST a veces rechaza o interpreta mal.
  */
 async function scanAndExpireOverdueMpPending(whatsappClient) {
   const sinceIso = new Date(Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000).toISOString();
@@ -301,7 +310,7 @@ async function scanAndExpireOverdueMpPending(whatsappClient) {
       .from(TABLES.orders)
       .select("*")
       .gte("created_at", sinceIso)
-      .eq("status", "pending")
+      .in("status", ["pending", "confirmed"])
       .or("payment_status.is.null,payment_status.eq.pending")
       .order("created_at", { ascending: true })
       .limit(EXPIRE_SCAN_LIMIT);
@@ -384,7 +393,7 @@ async function scanAndProcess(whatsappClientOrGetter) {
 function startPaymentStatusPoller(whatsappClientOrGetter) {
   if (!process.env.MP_ACCESS_TOKEN) {
     console.warn(
-      "[mp-poll] MP_ACCESS_TOKEN no configurado: no se consultan pagos en la API de MP; sí se aplican vencimientos de pedidos MP pending."
+      "[mp-poll] MP_ACCESS_TOKEN no configurado: no se consultan pagos en la API de MP; sí se aplican vencimientos de pedidos MP sin pago."
     );
   }
 
@@ -416,7 +425,7 @@ function startPaymentStatusPoller(whatsappClientOrGetter) {
     POLL_INTERVAL_MS,
     "ms (lookback",
     LOOKBACK_HOURS,
-    "h, timeout pending",
+    "h, timeout MP sin pago",
     MP_PENDING_TIMEOUT_MS,
     "ms). API:",
     process.env.MP_ACCESS_TOKEN ? "sí" : "no"
