@@ -1951,7 +1951,7 @@ export default function AdminApp({ onLogout }) {
       <div className="mx-auto max-w-7xl p-6">
         <header className="mb-6 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold">RestoBot · Panel</h1>
+            <h1 className="text-2xl font-bold">Mesafood</h1>
             <p className="text-sm text-slate-400">
               {isEncargado
                 ? "Encargado · pedidos y carta (sin configuración ni usuarios)"
