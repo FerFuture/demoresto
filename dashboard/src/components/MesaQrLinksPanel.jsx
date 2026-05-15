@@ -47,6 +47,10 @@ export default function MesaQrLinksPanel({
     [restaurantMetadata, n]
   );
   const previewTableBlocked = blockedTables.includes(previewTable);
+  const previewRow = useMemo(
+    () => rows.find((r) => r.table === previewTable),
+    [rows, previewTable]
+  );
 
   useEffect(() => {
     if (n >= 1 && (previewTable < 1 || previewTable > n)) {
@@ -368,6 +372,16 @@ export default function MesaQrLinksPanel({
                 >
                   Copiar enlace
                 </button>
+                {previewRow?.url ? (
+                  <a
+                    href={previewRow.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded border border-violet-500/45 bg-violet-500/10 px-3 py-1.5 text-xs font-medium text-violet-200 hover:bg-violet-500/20"
+                  >
+                    Abrir enlace
+                  </a>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => {
@@ -416,7 +430,7 @@ export default function MesaQrLinksPanel({
                 <tr>
                   <th className="px-3 py-2">Mesa</th>
                   <th className="px-3 py-2">Enlace</th>
-                  <th className="px-3 py-2 w-24">Copiar</th>
+                  <th className="px-3 py-2 w-40">Acciones</th>
                 </tr>
               </thead>
               <tbody>
@@ -425,13 +439,23 @@ export default function MesaQrLinksPanel({
                     <td className="px-3 py-2 font-semibold text-slate-200">{row.table}</td>
                     <td className="px-3 py-2 break-all font-mono text-[11px] text-slate-400">{row.url}</td>
                     <td className="px-3 py-2">
-                      <button
-                        type="button"
-                        onClick={() => copy(row.url)}
-                        className="rounded border border-slate-600 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800"
-                      >
-                        Copiar
-                      </button>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => copy(row.url)}
+                          className="rounded border border-slate-600 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800"
+                        >
+                          Copiar
+                        </button>
+                        <a
+                          href={row.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="rounded border border-violet-500/45 bg-violet-500/10 px-2 py-1 text-xs font-medium text-violet-200 hover:bg-violet-500/20"
+                        >
+                          Abrir enlace
+                        </a>
+                      </div>
                     </td>
                   </tr>
                 ))}

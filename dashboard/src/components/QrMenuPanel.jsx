@@ -198,7 +198,7 @@ export default function QrMenuPanel({ restaurantId, restaurantMetadata, restaura
                 rel="noreferrer"
                 className="rounded border border-violet-500/45 bg-violet-500/10 px-3 py-1.5 text-xs font-medium text-violet-200 hover:bg-violet-500/20"
               >
-                Abrir menú público
+                Abrir enlace
               </a>
             ) : null}
             <button
