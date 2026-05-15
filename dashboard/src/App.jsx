@@ -6,6 +6,7 @@ import DeliveryApp from "./screens/DeliveryApp";
 import KitchenApp from "./screens/KitchenApp";
 import WaiterApp from "./screens/WaiterApp";
 import MesaClientApp from "./screens/MesaClientApp";
+import PublicMenuApp from "./screens/PublicMenuApp";
 import { getSession, logout, SESSION_REVALIDATE_MS, validateStoredSession } from "./lib/auth";
 
 function homePathForRole(role) {
@@ -77,6 +78,7 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/carta" element={<MesaClientApp />} />
+      <Route path="/menu" element={<PublicMenuApp />} />
       <Route
         path="/login"
         element={

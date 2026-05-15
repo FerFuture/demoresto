@@ -188,6 +188,7 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
   const [stockThresholdDraftById, setStockThresholdDraftById] = useState({});
   /** Solo la fila con este id muestra el input de nombre; el resto usa un “entry” solo lectura. */
   const [editingStockNameId, setEditingStockNameId] = useState(null);
+  const [editingStockThresholdId, setEditingStockThresholdId] = useState(null);
   const [stockUnitVisibility, setStockUnitVisibility] = useState(() =>
     Object.fromEntries(STOCK_UNIT_OPTIONS.map((unit) => [unit, true]))
   );
@@ -496,17 +497,7 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
       Math.abs(currentStock - currentValueDb) < EPSILON &&
       normalizeStockUnit(unit) === normalizeStockUnit(item.unit);
     const nameUnchanged = normalizedName === previousNameNorm;
-    const parsedThreshold = parseLowStockThresholdForStorage(stockThresholdDraftById[item.id] ?? "", unit);
-    const dbThreshold =
-      item.low_stock_threshold != null && item.low_stock_threshold !== ""
-        ? parseQuantityValueByUnit(item.low_stock_threshold, unit, 0)
-        : null;
-    const thresholdUnchanged =
-      (parsedThreshold == null && dbThreshold == null) ||
-      (parsedThreshold != null &&
-        dbThreshold != null &&
-        Math.abs(parsedThreshold - dbThreshold) < EPSILON);
-    if (qtyUnchanged && nameUnchanged && thresholdUnchanged) return;
+    if (qtyUnchanged && nameUnchanged) return;
 
     setStockError("");
     setStockFlash("");
@@ -514,7 +505,6 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
     const patch = {
       current_stock: currentStock,
       unit,
-      low_stock_threshold: parsedThreshold,
       updated_at: new Date().toISOString()
     };
     if (!nameUnchanged) patch.name = normalizedName;
@@ -556,6 +546,45 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
     setStockFlash(flash);
   }
 
+  async function reponerStockItem(item) {
+    const draftUnit = stockUnitDraftById[item.id] ?? normalizeStockUnit(item.unit);
+    const draftValue =
+      stockDraftById[item.id] ??
+      formatQuantity(parseQuantityValueByUnit(item.current_stock, draftUnit, 0));
+    const currentStock = parseQuantityValueByUnit(draftValue, draftUnit, 0);
+    const unit = normalizeStockUnit(draftUnit);
+    const currentValueDb = parseQuantityValueByUnit(item.current_stock, item.unit, 0);
+    const qtyUnchanged =
+      Math.abs(currentStock - currentValueDb) < EPSILON &&
+      normalizeStockUnit(unit) === normalizeStockUnit(item.unit);
+    if (qtyUnchanged) return;
+
+    setStockError("");
+    setStockFlash("");
+    setSavingStockId(item.id);
+    const { data, error } = await supabase
+      .from("stock_items")
+      .update({
+        current_stock: currentStock,
+        unit,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", item.id)
+      .select("id, name, current_stock, unit, low_stock_threshold, updated_at")
+      .single();
+    setSavingStockId(null);
+    if (error) {
+      setStockError(`No se pudo reponer ${item.name}: ${error.message}`);
+      return;
+    }
+    setStockItems((prev) => prev.map((row) => (row.id === item.id ? data : row)));
+    setStockDraftById((prev) => ({ ...prev, [item.id]: formatQuantity(currentStock) }));
+    setStockUnitDraftById((prev) => ({ ...prev, [item.id]: unit }));
+    setStockFlash(
+      `${data.name || item.name}: stock repuesto a ${formatQuantity(currentStock)} ${normalizeStockUnit(unit)}.`
+    );
+  }
+
   async function saveStockItemThreshold(item) {
     const unit = stockUnitDraftById[item.id] ?? normalizeStockUnit(item.unit);
     const parsedThreshold = parseLowStockThresholdForStorage(stockThresholdDraftById[item.id] ?? "", unit);
@@ -595,6 +624,7 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
           ? formatQuantity(parseQuantityValueByUnit(data.low_stock_threshold, unit, 0))
           : ""
     }));
+    setEditingStockThresholdId((prev) => (prev === item.id ? null : prev));
     setStockFlash(
       parsedThreshold == null
         ? `${item.name}: umbral por defecto (${formatStockThresholdLabel({ ...item, unit, low_stock_threshold: null })}).`
@@ -1024,14 +1054,15 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
           Administrá ingredientes del inventario y recetas. El stock y los ingredientes se guardan en mayúsculas para
           evitar duplicados por formato.
         </p>
-        <button
-          type="button"
-          onClick={() => setActiveSection("alert")}
-          className="mt-3 rounded-lg border border-rose-500/50 bg-rose-600 px-4 py-2 text-sm font-semibold text-white shadow-sm shadow-rose-950/30 hover:bg-rose-500"
-        >
-          Alerta de stock
-          {lowStockItems.length > 0 ? ` (${lowStockItems.length})` : ""}
-        </button>
+        {lowStockItems.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => setActiveSection("alert")}
+            className="mt-3 rounded-lg border border-rose-500/50 bg-rose-600 px-4 py-2 text-sm font-semibold text-white shadow-sm shadow-rose-950/30 hover:bg-rose-500"
+          >
+            Alerta de stock ({lowStockItems.length})
+          </button>
+        ) : null}
       </div>
 
       <div className="flex flex-wrap gap-3">
@@ -1048,6 +1079,17 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
         </button>
         <button
           type="button"
+          onClick={() => setActiveSection("recipes")}
+          className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+            activeSection === "recipes"
+              ? "bg-emerald-500 text-slate-950"
+              : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
+          }`}
+        >
+          Recetario
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveSection("alert")}
           className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
             activeSection === "alert"
@@ -1059,17 +1101,6 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
         >
           Alerta
           {lowStockItems.length > 0 ? ` (${lowStockItems.length})` : ""}
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveSection("recipes")}
-          className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
-            activeSection === "recipes"
-              ? "bg-emerald-500 text-slate-950"
-              : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
-          }`}
-        >
-          Recetario
         </button>
       </div>
 
@@ -1185,6 +1216,7 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
                     const rowBusy = savingStockId === item.id;
                     const nameDraftValue = stockNameDraftById[item.id] ?? normalizeUppercaseText(item.name || "");
                     const editingName = editingStockNameId === item.id;
+                    const editingThreshold = editingStockThresholdId === item.id;
                     const nameDirty =
                       normalizeStockNameForStorage(nameDraftValue) !== normalizeStockNameForStorage(item.name);
                     const qtyDirty =
@@ -1239,31 +1271,37 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
                           <p className="text-xs text-slate-500">
                             Stock actual: {formatStockDisplay(currentValue, item.unit)}
                           </p>
-                          <label className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                            <span className="text-slate-500">Alerta si stock ≤</span>
-                            <input
-                              type="text"
-                              inputMode={draftUnit === "UNIDAD" ? "numeric" : "decimal"}
-                              value={stockThresholdDraftById[item.id] ?? ""}
-                              placeholder={
-                                defaultThresholdForUnit(draftUnit) != null
-                                  ? formatQuantity(defaultThresholdForUnit(draftUnit))
-                                  : ""
-                              }
-                              disabled={rowBusy}
-                              onChange={(e) =>
-                                setStockThresholdDraftById((prev) => ({
-                                  ...prev,
-                                  [item.id]: normalizeNumericInputByUnit(e.target.value, draftUnit)
-                                }))
-                              }
-                              className="h-9 w-24 rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100 disabled:opacity-50"
-                            />
-                            <span className="text-slate-500">{draftUnit}</span>
-                            <span className="text-slate-600">
-                              (vacío = default {formatStockThresholdLabel({ unit: draftUnit })})
-                            </span>
-                          </label>
+                          <p className="text-xs text-slate-500">
+                            Umbral: {formatStockThresholdLabel({ ...item, unit: draftUnit })}
+                          </p>
+                          {editingThreshold ? (
+                            <label className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                              <span className="text-slate-500">Alerta si stock ≤</span>
+                              <input
+                                type="text"
+                                inputMode={draftUnit === "UNIDAD" ? "numeric" : "decimal"}
+                                value={stockThresholdDraftById[item.id] ?? ""}
+                                placeholder={
+                                  defaultThresholdForUnit(draftUnit) != null
+                                    ? formatQuantity(defaultThresholdForUnit(draftUnit))
+                                    : ""
+                                }
+                                disabled={rowBusy}
+                                autoFocus
+                                onChange={(e) =>
+                                  setStockThresholdDraftById((prev) => ({
+                                    ...prev,
+                                    [item.id]: normalizeNumericInputByUnit(e.target.value, draftUnit)
+                                  }))
+                                }
+                                className="h-9 w-24 rounded-lg border border-amber-500/50 bg-slate-950 px-2 text-sm text-slate-100 outline-none ring-1 ring-amber-500/30 disabled:opacity-50"
+                              />
+                              <span className="text-slate-500">{draftUnit}</span>
+                              <span className="text-slate-600">
+                                (vacío = default {formatStockThresholdLabel({ unit: draftUnit })})
+                              </span>
+                            </label>
+                          ) : null}
                         </div>
 
                         <div className="flex w-full min-w-0 flex-wrap items-center gap-2 border-t border-slate-800/80 pt-1">
@@ -1325,7 +1363,7 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
                           </select>
                           <button
                             type="button"
-                            disabled={rowBusy || (!nameDirty && !qtyDirty && !thresholdDirty)}
+                            disabled={rowBusy || (!nameDirty && !qtyDirty)}
                             onClick={() => {
                               void saveStockItemRow(item);
                             }}
@@ -1372,6 +1410,69 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
                               className="rounded-lg border border-sky-500/45 bg-sky-500/15 px-3 py-2 text-xs font-medium text-sky-200 hover:bg-sky-500/25 disabled:opacity-50"
                             >
                               Editar
+                            </button>
+                          )}
+                          {editingThreshold ? (
+                            <>
+                              <button
+                                type="button"
+                                disabled={rowBusy || !thresholdDirty}
+                                onClick={() => {
+                                  void saveStockItemThreshold(item);
+                                }}
+                                className="rounded-lg border border-amber-500/45 bg-amber-500/15 px-3 py-2 text-xs font-medium text-amber-100 hover:bg-amber-500/25 disabled:opacity-50"
+                              >
+                                Guardar umbral
+                              </button>
+                              <button
+                                type="button"
+                                disabled={rowBusy}
+                                onClick={() => setEditingStockThresholdId(null)}
+                                className="rounded-lg border border-slate-600 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                              >
+                                Listo
+                              </button>
+                              <button
+                                type="button"
+                                disabled={rowBusy}
+                                onClick={() => {
+                                  const unit = stockUnitDraftById[item.id] ?? normalizeStockUnit(item.unit);
+                                  setStockThresholdDraftById((prev) => ({
+                                    ...prev,
+                                    [item.id]:
+                                      item.low_stock_threshold != null && item.low_stock_threshold !== ""
+                                        ? formatQuantity(
+                                            parseQuantityValueByUnit(item.low_stock_threshold, unit, 0)
+                                          )
+                                        : ""
+                                  }));
+                                  setEditingStockThresholdId(null);
+                                }}
+                                className="rounded-lg border border-slate-600 px-3 py-2 text-xs font-medium text-slate-400 hover:bg-slate-800 disabled:opacity-50"
+                              >
+                                Cancelar
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={rowBusy}
+                              onClick={() => {
+                                const unit = stockUnitDraftById[item.id] ?? normalizeStockUnit(item.unit);
+                                setStockThresholdDraftById((prev) => ({
+                                  ...prev,
+                                  [item.id]:
+                                    item.low_stock_threshold != null && item.low_stock_threshold !== ""
+                                      ? formatQuantity(
+                                          parseQuantityValueByUnit(item.low_stock_threshold, unit, 0)
+                                        )
+                                      : ""
+                                }));
+                                setEditingStockThresholdId(item.id);
+                              }}
+                              className="rounded-lg border border-amber-500/45 bg-amber-500/15 px-3 py-2 text-xs font-medium text-amber-200 hover:bg-amber-500/25 disabled:opacity-50"
+                            >
+                              Umbral
                             </button>
                           )}
                           <button
@@ -1486,88 +1587,116 @@ export default function StockManagerPanel({ restaurantId, onLowStockCountChange 
         <div className="rounded-xl border border-rose-500/35 bg-slate-900 p-4">
           <h3 className="text-sm font-semibold text-rose-100">Alerta de stock</h3>
           <p className="mt-1 text-xs text-slate-400">
-            Ingredientes con stock en o por debajo del umbral. {STOCK_ALERT_DEFAULTS_HINT} Podés personalizar el umbral
-            de cada ingrediente abajo.
+            Ingredientes por reponer (stock en o por debajo del umbral). {STOCK_ALERT_DEFAULTS_HINT} Los umbrales se
+            editan en la pestaña Stock con el botón Umbral.
           </p>
+          {stockError ? (
+            <p className="mt-3 whitespace-pre-wrap rounded-lg border border-rose-500/35 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+              {stockError}
+            </p>
+          ) : null}
+          {stockFlash ? (
+            <p className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-100/95">
+              {stockFlash}
+            </p>
+          ) : null}
           {loadingStock ? (
             <p className="mt-4 text-sm text-slate-500">Cargando stock…</p>
           ) : lowStockItems.length === 0 ? (
             <p className="mt-4 rounded-lg border border-emerald-500/30 bg-emerald-950/25 px-3 py-2 text-sm text-emerald-100/95">
-              No hay ingredientes por debajo de los umbrales de alerta.
+              No hay ingredientes por reponer.
             </p>
-          ) : null}
-
-          <div className="mt-4 space-y-2">
-            <p className="text-xs font-medium text-slate-400">Umbrales por ingrediente</p>
-            {stockItems.length === 0 ? (
-              <p className="text-sm text-slate-500">No hay ingredientes en stock.</p>
-            ) : (
-              <ul className="space-y-2">
-                {stockItems.map((item) => {
-                  const unit = stockUnitDraftById[item.id] ?? normalizeStockUnit(item.unit);
-                  const current = parseQuantityValueByUnit(item.current_stock, unit, 0);
-                  const isLow = isStockItemLow({ ...item, unit });
-                  const defaultT = defaultThresholdForUnit(unit);
-                  const thresholdPlaceholder =
-                    defaultT != null ? formatQuantity(defaultT) : "";
-                  const rowBusy = savingStockId === item.id;
-                  return (
-                    <li
-                      key={item.id}
-                      className={`flex flex-col gap-2 rounded-lg border px-3 py-2.5 sm:flex-row sm:flex-wrap sm:items-center ${
-                        isLow
-                          ? "border-rose-500/35 bg-rose-500/10"
-                          : "border-slate-800 bg-slate-950/40"
-                      }`}
-                    >
-                      <div className="min-w-0 flex-1">
-                        <span className="font-medium text-slate-100">{item.name}</span>
-                        <p className="mt-0.5 text-xs text-slate-500">
-                          Stock: {formatStockDisplay(current, unit)}
-                          {isLow ? (
-                            <span className="ml-1 font-medium text-rose-300">· bajo</span>
-                          ) : null}
-                        </p>
-                      </div>
-                      <label className="flex items-center gap-2 text-xs">
-                        <span className="text-slate-500 shrink-0">Alerta ≤</span>
-                        <input
-                          type="text"
-                          inputMode={unit === "UNIDAD" ? "numeric" : "decimal"}
-                          value={stockThresholdDraftById[item.id] ?? ""}
-                          placeholder={thresholdPlaceholder}
-                          disabled={rowBusy}
-                          onChange={(e) =>
-                            setStockThresholdDraftById((prev) => ({
-                              ...prev,
-                              [item.id]: normalizeNumericInputByUnit(e.target.value, unit)
-                            }))
-                          }
-                          className="h-9 w-24 rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100 disabled:opacity-50"
-                        />
-                        <span className="text-slate-500">{normalizeStockUnit(unit)}</span>
-                      </label>
+          ) : (
+            <div className="mt-4 space-y-3">
+              {lowStockItems.map((item) => {
+                const currentValue = parseQuantityValueByUnit(item.current_stock, item.unit, 0);
+                const draftUnit = stockUnitDraftById[item.id] ?? normalizeStockUnit(item.unit);
+                const draftValue =
+                  stockDraftById[item.id] ??
+                  formatQuantity(parseQuantityValueByUnit(currentValue, draftUnit, 0));
+                const parsedDraftValue = parseQuantityValueByUnit(draftValue, draftUnit, 0);
+                const rowBusy = savingStockId === item.id;
+                const qtyDirty =
+                  Math.abs(parsedDraftValue - currentValue) >= EPSILON ||
+                  normalizeStockUnit(draftUnit) !== normalizeStockUnit(item.unit);
+                return (
+                  <div
+                    key={item.id}
+                    className="flex flex-col gap-4 rounded-xl border border-rose-500/35 bg-rose-500/10 p-4"
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <p className="text-sm font-semibold text-slate-100">{item.name}</p>
+                      <p className="text-xs text-slate-500">
+                        Stock actual: {formatStockDisplay(currentValue, item.unit)}
+                      </p>
+                      <p className="text-xs text-rose-300/90">
+                        Umbral: {formatStockThresholdLabel({ ...item, unit: draftUnit })}
+                      </p>
+                    </div>
+                    <div className="flex w-full min-w-0 flex-wrap items-center gap-2 border-t border-rose-500/20 pt-1">
+                      <button
+                        type="button"
+                        disabled={rowBusy || parsedDraftValue <= 0}
+                        onClick={() => adjustStockDraft(item, -1)}
+                        className="h-10 w-10 rounded-lg border border-slate-600 text-lg leading-none text-slate-300 hover:bg-slate-800 disabled:opacity-30"
+                      >
+                        −
+                      </button>
+                      <span className="min-w-[3.5rem] text-center text-lg font-semibold tabular-nums text-slate-100">
+                        {formatQuantity(parsedDraftValue)}
+                      </span>
                       <button
                         type="button"
                         disabled={rowBusy}
-                        onClick={() => void saveStockItemThreshold(item)}
-                        className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                        onClick={() => adjustStockDraft(item, 1)}
+                        className="h-10 w-10 rounded-lg bg-emerald-600 text-lg font-semibold leading-none text-white hover:bg-emerald-500 disabled:opacity-50"
                       >
-                        {rowBusy ? "…" : "Guardar umbral"}
+                        +
                       </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={() => setActiveSection("stock")}
-            className="mt-4 rounded-lg border border-slate-600 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800"
-          >
-            Ir a Stock para reponer
-          </button>
+                      <input
+                        type="text"
+                        inputMode={draftUnit === "UNIDAD" ? "numeric" : "decimal"}
+                        value={draftValue}
+                        onChange={(event) =>
+                          setStockDraftById((prev) => ({
+                            ...prev,
+                            [item.id]: normalizeNumericInputByUnit(event.target.value, draftUnit)
+                          }))
+                        }
+                        className="h-10 w-24 rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100"
+                      />
+                      <select
+                        value={draftUnit}
+                        onChange={(event) => {
+                          const nextUnit = normalizeStockUnit(event.target.value);
+                          setStockUnitDraftById((prev) => ({ ...prev, [item.id]: nextUnit }));
+                          setStockDraftById((prev) => ({
+                            ...prev,
+                            [item.id]: normalizeNumericInputByUnit(prev[item.id] ?? draftValue, nextUnit)
+                          }));
+                        }}
+                        className="h-10 rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100"
+                      >
+                        {STOCK_UNIT_OPTIONS.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        disabled={rowBusy || !qtyDirty}
+                        onClick={() => void reponerStockItem(item)}
+                        className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
+                      >
+                        {rowBusy ? "Guardando…" : "Reponer"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 

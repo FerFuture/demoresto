@@ -11,6 +11,7 @@ export default function MaestroPanel({
   localEnabled,
   mesaEnabled,
   mesaQrEnabled,
+  qrMenuEnabled,
   waiterFulfillmentSelectorEnabled,
   botRuntimeSwitchesVisible,
   cashEnabled,
@@ -23,6 +24,7 @@ export default function MaestroPanel({
   onServiceFlagsUpdated,
   onTableCountUpdated,
   onMesaQrModuleToggle,
+  onQrMenuPanelToggle,
   onWaiterFulfillmentSelectorToggle,
   onBotRuntimeSwitchesVisibleToggle,
   onStockPanelToggle,
@@ -130,6 +132,24 @@ export default function MaestroPanel({
       return;
     }
     setLocalOk(nextEnabled ? "Carta y QR mesas habilitado." : "Carta y QR mesas deshabilitado.");
+  }
+
+  async function setQrMenuFlag(nextEnabled) {
+    if (savingDelivery || savingTables) return;
+    if (typeof onQrMenuPanelToggle !== "function") {
+      setLocalError("No se pudo actualizar QR Menú.");
+      return;
+    }
+    setLocalError("");
+    setLocalOk("");
+    setSavingDelivery(true);
+    const result = await onQrMenuPanelToggle(Boolean(nextEnabled));
+    setSavingDelivery(false);
+    if (!result?.ok) {
+      setLocalError("No se pudo guardar QR Menú.");
+      return;
+    }
+    setLocalOk(nextEnabled ? "QR Menú habilitado." : "QR Menú deshabilitado.");
   }
 
   async function saveDashboardBaseUrl() {
@@ -246,6 +266,9 @@ export default function MaestroPanel({
           </li>
           <li>
             <strong>Estadísticas:</strong> muestra/oculta la pestaña de estadísticas en el panel admin.
+          </li>
+          <li>
+            <strong>QR Menú:</strong> muestra/oculta la pestaña del menú con QR/enlace <code className="text-[11px]">/menu</code> (solo lectura, sin pedidos).
           </li>
           <li>
             <strong>Carta y QR mesas:</strong> controla la pestaña específica del dashboard para gestión de QR por mesa.
@@ -592,6 +615,48 @@ export default function MaestroPanel({
                 />
               </button>
               <span className={`w-9 text-center text-xs font-bold uppercase tracking-wide ${statsEnabled ? "text-emerald-300" : "text-slate-500"}`}>
+                On
+              </span>
+            </div>
+            </div>
+
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-slate-200">QR Menú (Dashboard)</p>
+              <p className="mt-1 text-xs text-slate-500">
+                {qrMenuEnabled
+                  ? "ON · Se muestra la pestaña QR Menú con el menú y precios (solo lectura)."
+                  : "OFF · Se oculta la pestaña QR Menú en el dashboard."}
+              </p>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-3 sm:gap-4">
+              <span className={`w-9 text-center text-xs font-bold uppercase tracking-wide ${qrMenuEnabled ? "text-slate-500" : "text-rose-300"}`}>
+                Off
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={qrMenuEnabled}
+                aria-label={qrMenuEnabled ? "QR Menú activado. Pulsa para desactivar." : "QR Menú desactivado. Pulsa para activar."}
+                disabled={busy}
+                onClick={() => setQrMenuFlag(!qrMenuEnabled)}
+                className={[
+                  "relative h-10 w-[4.5rem] shrink-0 rounded-full border border-slate-600/80 transition-colors duration-200",
+                  qrMenuEnabled ? "bg-emerald-600" : "bg-slate-700",
+                  busy ? "cursor-not-allowed opacity-50" : "cursor-pointer",
+                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900"
+                ].join(" ")}
+              >
+                <span
+                  aria-hidden
+                  className={[
+                    "absolute top-1 left-1 block h-8 w-8 rounded-full bg-white shadow-md ring-1 ring-black/10 transition-transform duration-200 ease-out",
+                    qrMenuEnabled ? "translate-x-8" : "translate-x-0"
+                  ].join(" ")}
+                />
+              </button>
+              <span className={`w-9 text-center text-xs font-bold uppercase tracking-wide ${qrMenuEnabled ? "text-emerald-300" : "text-slate-500"}`}>
                 On
               </span>
             </div>

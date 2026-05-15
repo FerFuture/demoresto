@@ -32,6 +32,7 @@ import DashboardUsersPanel from "./DashboardUsersPanel";
 import MaestroPanel from "./MaestroPanel";
 import MesaQrLinksPanel from "../components/MesaQrLinksPanel";
 import StockManagerPanel from "../components/StockManagerPanel";
+import QrMenuPanel from "../components/QrMenuPanel";
 import OrdersDateRangeCalendar from "../components/OrdersDateRangeCalendar";
 import { fetchRestaurantForDashboard } from "../lib/restaurantTenant";
 import { isValidPublicDashboardBaseUrl, normalizePublicDashboardBaseUrlInput } from "../lib/publicDashboardUrl";
@@ -368,7 +369,7 @@ export default function AdminApp({ onLogout }) {
 
   useEffect(() => {
     if (!isEncargado) return;
-    const hidden = new Set(["settings", "users", "stats", "mesaqr", "stock", "maestro"]);
+    const hidden = new Set(["settings", "users", "stats", "qrmenu", "mesaqr", "stock", "maestro"]);
     if (hidden.has(activeTab)) setActiveTab("orders");
   }, [isEncargado, activeTab]);
   const [orders, setOrders] = useState([]);
@@ -434,6 +435,7 @@ export default function AdminApp({ onLogout }) {
   const [localEnabled, setLocalEnabled] = useState(true);
   const [mesaEnabled, setMesaEnabled] = useState(true);
   const [mesaQrEnabled, setMesaQrEnabled] = useState(true);
+  const [qrMenuEnabled, setQrMenuEnabled] = useState(true);
   const [waiterFulfillmentSelectorEnabled, setWaiterFulfillmentSelectorEnabled] = useState(false);
   const [botRuntimeSwitchesVisible, setBotRuntimeSwitchesVisible] = useState(false);
   /** Master OFF en metadata → bot en silencio total (sin respuesta ni registro). */
@@ -456,6 +458,10 @@ export default function AdminApp({ onLogout }) {
   useEffect(() => {
     if (activeTab === "stats" && !statsEnabled) setActiveTab("orders");
   }, [activeTab, statsEnabled]);
+
+  useEffect(() => {
+    if (activeTab === "qrmenu" && !qrMenuEnabled) setActiveTab("orders");
+  }, [activeTab, qrMenuEnabled]);
 
   useEffect(() => {
     if (activeTab === "mesaqr" && !mesaQrEnabled) setActiveTab("orders");
@@ -780,6 +786,7 @@ export default function AdminApp({ onLogout }) {
     setMesaEnabled(data.mesa_enabled !== false);
     setRestaurantMetadata(metadataObj);
     setMesaQrEnabled(metadataObj.mesa_qr_enabled !== false);
+    setQrMenuEnabled(metadataObj.qr_menu_enabled !== false);
     setWaiterFulfillmentSelectorEnabled(metadataObj.waiter_fulfillment_selector_enabled === true);
     setBotRuntimeSwitchesVisible(metadataObj.bot_runtime_switches_visible === true);
     setBotWhatsappEnabled(metadataObj.bot_whatsapp_enabled !== false);
@@ -927,6 +934,29 @@ export default function AdminApp({ onLogout }) {
     setConfigFlash("Configuración guardada. Los cambios se aplican en los próximos mensajes al cliente.");
     setSavingConfig(false);
     setTimeout(() => setConfigFlash(""), 6000);
+  }
+
+  async function setQrMenuModuleEnabled(nextEnabled) {
+    if (!restaurantId) {
+      setError("No hay restaurante cargado.");
+      return { ok: false };
+    }
+    setError("");
+    const nextMetadata = {
+      ...(restaurantMetadata && typeof restaurantMetadata === "object" ? restaurantMetadata : {}),
+      qr_menu_enabled: Boolean(nextEnabled)
+    };
+    const { error: updateError } = await supabase
+      .from("restaurants")
+      .update({ metadata: nextMetadata })
+      .eq("id", restaurantId);
+    if (updateError) {
+      setError(`No se pudo guardar módulo QR Menú: ${updateError.message}`);
+      return { ok: false, error: updateError };
+    }
+    setRestaurantMetadata(nextMetadata);
+    setQrMenuEnabled(Boolean(nextEnabled));
+    return { ok: true };
   }
 
   async function setMesaQrModuleEnabled(nextEnabled) {
@@ -1970,6 +2000,19 @@ export default function AdminApp({ onLogout }) {
           >
             Gestor de Menu
           </button>
+          {canAccessFullAdminPanel && qrMenuEnabled ? (
+            <button
+              type="button"
+              onClick={() => setActiveTab("qrmenu")}
+              className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                activeTab === "qrmenu"
+                  ? "bg-emerald-500 text-slate-950"
+                  : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
+              }`}
+            >
+              QR Menú
+            </button>
+          ) : null}
           {canAccessFullAdminPanel && mesaQrEnabled ? (
             <button
               type="button"
@@ -3003,6 +3046,12 @@ export default function AdminApp({ onLogout }) {
               ))
             )}
           </section>
+        ) : activeTab === "qrmenu" && qrMenuEnabled ? (
+          <QrMenuPanel
+            restaurantId={restaurantId}
+            restaurantMetadata={restaurantMetadata}
+            restaurantName={restaurantConfig.public_name || restaurantConfig.name || restaurantName}
+          />
         ) : activeTab === "mesaqr" ? (
           <section className="space-y-4">
             <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
@@ -3035,6 +3084,7 @@ export default function AdminApp({ onLogout }) {
             localEnabled={localEnabled}
             mesaEnabled={mesaEnabled}
             mesaQrEnabled={mesaQrEnabled}
+            qrMenuEnabled={qrMenuEnabled}
             waiterFulfillmentSelectorEnabled={waiterFulfillmentSelectorEnabled}
             botRuntimeSwitchesVisible={botRuntimeSwitchesVisible}
             cashEnabled={cashEnabled}
@@ -3049,6 +3099,7 @@ export default function AdminApp({ onLogout }) {
             onServiceFlagsUpdated={() => loadRestaurantConfig(restaurantId)}
             onTableCountUpdated={() => loadRestaurantConfig(restaurantId)}
             onMesaQrModuleToggle={setMesaQrModuleEnabled}
+            onQrMenuPanelToggle={setQrMenuModuleEnabled}
             onWaiterFulfillmentSelectorToggle={setWaiterFulfillmentSelectorFlag}
             onBotRuntimeSwitchesVisibleToggle={setBotRuntimeSwitchesVisibleFlag}
             onStockPanelToggle={setStockPanelEnabledFlag}
