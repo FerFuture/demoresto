@@ -35,6 +35,7 @@ import StockManagerPanel from "../components/StockManagerPanel";
 import OrdersDateRangeCalendar from "../components/OrdersDateRangeCalendar";
 import { fetchRestaurantForDashboard } from "../lib/restaurantTenant";
 import { isValidPublicDashboardBaseUrl, normalizePublicDashboardBaseUrlInput } from "../lib/publicDashboardUrl";
+import { countLowStockItems } from "../lib/stockAlerts";
 import { getSession } from "../lib/auth";
 import { WEEKDAY_OPTIONS } from "../lib/deliverySchedule";
 
@@ -444,6 +445,7 @@ export default function AdminApp({ onLogout }) {
   const [mercadoPagoEnabled, setMercadoPagoEnabled] = useState(true);
   const [statsEnabled, setStatsEnabled] = useState(true);
   const [stockPanelEnabled, setStockPanelEnabled] = useState(true);
+  const [lowStockAlertCount, setLowStockAlertCount] = useState(0);
   const [loadingConfig, setLoadingConfig] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [configFlash, setConfigFlash] = useState("");
@@ -462,6 +464,29 @@ export default function AdminApp({ onLogout }) {
   useEffect(() => {
     if (activeTab === "stock" && !stockPanelEnabled) setActiveTab("orders");
   }, [activeTab, stockPanelEnabled]);
+
+  useEffect(() => {
+    if (!restaurantId || !stockPanelEnabled) {
+      setLowStockAlertCount(0);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from("stock_items")
+        .select("id, name, current_stock, unit, low_stock_threshold")
+        .eq("restaurant_id", restaurantId);
+      if (cancelled) return;
+      if (error) {
+        setLowStockAlertCount(0);
+        return;
+      }
+      setLowStockAlertCount(countLowStockItems(data || []));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [restaurantId, stockPanelEnabled]);
 
   function requestConfirm({
     title = "Confirmar acción",
@@ -1962,12 +1987,23 @@ export default function AdminApp({ onLogout }) {
             <button
               type="button"
               onClick={() => setActiveTab("stock")}
-              className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${
                 activeTab === "stock"
                   ? "bg-emerald-500 text-slate-950"
                   : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
               }`}
             >
+              {lowStockAlertCount > 0 ? (
+                <span
+                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-rose-500 text-white"
+                  title={`${lowStockAlertCount} ingrediente(s) con stock bajo`}
+                  aria-hidden
+                >
+                  <svg viewBox="0 0 24 24" className="h-3 w-3" fill="currentColor" aria-hidden>
+                    <path d="M12 2L1 21h22L12 2zm0 6.5a1 1 0 011 1v5a1 1 0 11-2 0v-5a1 1 0 011-1zm0 9a1.25 1.25 0 100 2.5 1.25 1.25 0 000-2.5z" />
+                  </svg>
+                </span>
+              ) : null}
               Gestor de stock
             </button>
           ) : null}
@@ -2987,7 +3023,7 @@ export default function AdminApp({ onLogout }) {
             />
           </section>
         ) : activeTab === "stock" && stockPanelEnabled ? (
-          <StockManagerPanel restaurantId={restaurantId} />
+          <StockManagerPanel restaurantId={restaurantId} onLowStockCountChange={setLowStockAlertCount} />
         ) : activeTab === "stats" && statsEnabled ? (
           <AdminStats restaurantId={restaurantId} />
         ) : activeTab === "users" ? (

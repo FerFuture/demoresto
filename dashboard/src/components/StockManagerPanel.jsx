@@ -1,4 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
+import {
+  STOCK_ALERT_DEFAULTS_HINT,
+  defaultThresholdForUnit,
+  formatStockThresholdLabel,
+  isStockItemLow,
+  parseLowStockThresholdForStorage,
+  parseQuantityValueByUnit
+} from "../lib/stockAlerts";
 import { supabase } from "../supabaseClient";
 
 const STOCK_UNIT_OPTIONS = ["KG", "G", "L", "ML", "UNIDAD", "PAQUETE"];
@@ -69,14 +77,6 @@ function parseQuantityValue(value, fallback = 0) {
   const parsed = Number(normalized);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;
   return Math.round(parsed * 1000) / 1000;
-}
-
-function parseQuantityValueByUnit(value, unit, fallback = 0) {
-  const parsed = parseQuantityValue(value, fallback);
-  if (normalizeStockUnit(unit) === "UNIDAD") {
-    return Math.max(0, Math.floor(parsed + EPSILON));
-  }
-  return parsed;
 }
 
 function formatQuantity(value) {
@@ -179,12 +179,13 @@ function fallbackRecipeNameFromText(text) {
   return firstLine ? firstLine.slice(0, 80) : "";
 }
 
-export default function StockManagerPanel({ restaurantId }) {
+export default function StockManagerPanel({ restaurantId, onLowStockCountChange }) {
   const [activeSection, setActiveSection] = useState("stock");
   const [stockItems, setStockItems] = useState([]);
   const [stockDraftById, setStockDraftById] = useState({});
   const [stockUnitDraftById, setStockUnitDraftById] = useState({});
   const [stockNameDraftById, setStockNameDraftById] = useState({});
+  const [stockThresholdDraftById, setStockThresholdDraftById] = useState({});
   /** Solo la fila con este id muestra el input de nombre; el resto usa un “entry” solo lectura. */
   const [editingStockNameId, setEditingStockNameId] = useState(null);
   const [stockUnitVisibility, setStockUnitVisibility] = useState(() =>
@@ -220,6 +221,22 @@ export default function StockManagerPanel({ restaurantId }) {
     }
     return map;
   }, [stockItems]);
+
+  const lowStockItems = useMemo(
+    () =>
+      stockItems
+        .filter(isStockItemLow)
+        .sort((a, b) =>
+          String(a.name || "").localeCompare(String(b.name || ""), "es", { sensitivity: "base" })
+        ),
+    [stockItems]
+  );
+
+  useEffect(() => {
+    if (typeof onLowStockCountChange === "function") {
+      onLowStockCountChange(lowStockItems.length);
+    }
+  }, [lowStockItems.length, onLowStockCountChange]);
 
   const visibleStockItems = useMemo(
     () => stockItems.filter((item) => stockUnitVisibility[normalizeStockUnit(item.unit)] !== false),
@@ -264,7 +281,7 @@ export default function StockManagerPanel({ restaurantId }) {
       setLoadingStock(true);
       const { data, error } = await supabase
         .from("stock_items")
-        .select("id, name, current_stock, unit, updated_at")
+        .select("id, name, current_stock, unit, low_stock_threshold, updated_at")
         .eq("restaurant_id", restaurantId)
         .order("name", { ascending: true });
       if (cancelled) return;
@@ -274,6 +291,7 @@ export default function StockManagerPanel({ restaurantId }) {
         setStockDraftById({});
         setStockUnitDraftById({});
         setStockNameDraftById({});
+        setStockThresholdDraftById({});
         setLoadingStock(false);
         return;
       }
@@ -289,6 +307,16 @@ export default function StockManagerPanel({ restaurantId }) {
       );
       setStockNameDraftById(
         Object.fromEntries(items.map((item) => [item.id, normalizeUppercaseText(item.name || "")]))
+      );
+      setStockThresholdDraftById(
+        Object.fromEntries(
+          items.map((item) => [
+            item.id,
+            item.low_stock_threshold != null && item.low_stock_threshold !== ""
+              ? formatQuantity(parseQuantityValueByUnit(item.low_stock_threshold, item.unit, 0))
+              : ""
+          ])
+        )
       );
       setLoadingStock(false);
     }
@@ -415,7 +443,7 @@ export default function StockManagerPanel({ restaurantId }) {
         unit,
         updated_at: new Date().toISOString()
       })
-      .select("id, name, current_stock, unit, updated_at")
+      .select("id, name, current_stock, unit, low_stock_threshold, updated_at")
       .single();
     setAddingStock(false);
     if (error) {
@@ -468,7 +496,17 @@ export default function StockManagerPanel({ restaurantId }) {
       Math.abs(currentStock - currentValueDb) < EPSILON &&
       normalizeStockUnit(unit) === normalizeStockUnit(item.unit);
     const nameUnchanged = normalizedName === previousNameNorm;
-    if (qtyUnchanged && nameUnchanged) return;
+    const parsedThreshold = parseLowStockThresholdForStorage(stockThresholdDraftById[item.id] ?? "", unit);
+    const dbThreshold =
+      item.low_stock_threshold != null && item.low_stock_threshold !== ""
+        ? parseQuantityValueByUnit(item.low_stock_threshold, unit, 0)
+        : null;
+    const thresholdUnchanged =
+      (parsedThreshold == null && dbThreshold == null) ||
+      (parsedThreshold != null &&
+        dbThreshold != null &&
+        Math.abs(parsedThreshold - dbThreshold) < EPSILON);
+    if (qtyUnchanged && nameUnchanged && thresholdUnchanged) return;
 
     setStockError("");
     setStockFlash("");
@@ -476,6 +514,7 @@ export default function StockManagerPanel({ restaurantId }) {
     const patch = {
       current_stock: currentStock,
       unit,
+      low_stock_threshold: parsedThreshold,
       updated_at: new Date().toISOString()
     };
     if (!nameUnchanged) patch.name = normalizedName;
@@ -483,7 +522,7 @@ export default function StockManagerPanel({ restaurantId }) {
       .from("stock_items")
       .update(patch)
       .eq("id", item.id)
-      .select("id, name, current_stock, unit, updated_at")
+      .select("id, name, current_stock, unit, low_stock_threshold, updated_at")
       .single();
     setSavingStockId(null);
     if (error) {
@@ -500,6 +539,13 @@ export default function StockManagerPanel({ restaurantId }) {
     setStockDraftById((prev) => ({ ...prev, [item.id]: formatQuantity(currentStock) }));
     setStockUnitDraftById((prev) => ({ ...prev, [item.id]: unit }));
     setStockNameDraftById((prev) => ({ ...prev, [item.id]: normalizeUppercaseText(data.name || "") }));
+    setStockThresholdDraftById((prev) => ({
+      ...prev,
+      [item.id]:
+        data.low_stock_threshold != null && data.low_stock_threshold !== ""
+          ? formatQuantity(parseQuantityValueByUnit(data.low_stock_threshold, unit, 0))
+          : ""
+    }));
     setEditingStockNameId((prev) => (prev === item.id ? null : prev));
     const displayName = data.name || normalizedName;
     let flash = `${displayName}: stock actualizado a ${formatQuantity(currentStock)} ${normalizeStockUnit(unit)}.`;
@@ -508,6 +554,52 @@ export default function StockManagerPanel({ restaurantId }) {
       flash = `${displayName}: nombre y stock actualizados (${formatQuantity(currentStock)} ${normalizeStockUnit(unit)}).`;
     }
     setStockFlash(flash);
+  }
+
+  async function saveStockItemThreshold(item) {
+    const unit = stockUnitDraftById[item.id] ?? normalizeStockUnit(item.unit);
+    const parsedThreshold = parseLowStockThresholdForStorage(stockThresholdDraftById[item.id] ?? "", unit);
+    const dbThreshold =
+      item.low_stock_threshold != null && item.low_stock_threshold !== ""
+        ? parseQuantityValueByUnit(item.low_stock_threshold, unit, 0)
+        : null;
+    const thresholdUnchanged =
+      (parsedThreshold == null && dbThreshold == null) ||
+      (parsedThreshold != null &&
+        dbThreshold != null &&
+        Math.abs(parsedThreshold - dbThreshold) < EPSILON);
+    if (thresholdUnchanged) return;
+
+    setStockError("");
+    setStockFlash("");
+    setSavingStockId(item.id);
+    const { data, error } = await supabase
+      .from("stock_items")
+      .update({
+        low_stock_threshold: parsedThreshold,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", item.id)
+      .select("id, name, current_stock, unit, low_stock_threshold, updated_at")
+      .single();
+    setSavingStockId(null);
+    if (error) {
+      setStockError(`No se pudo guardar el umbral de ${item.name}: ${error.message}`);
+      return;
+    }
+    setStockItems((prev) => prev.map((row) => (row.id === item.id ? data : row)));
+    setStockThresholdDraftById((prev) => ({
+      ...prev,
+      [item.id]:
+        data.low_stock_threshold != null && data.low_stock_threshold !== ""
+          ? formatQuantity(parseQuantityValueByUnit(data.low_stock_threshold, unit, 0))
+          : ""
+    }));
+    setStockFlash(
+      parsedThreshold == null
+        ? `${item.name}: umbral por defecto (${formatStockThresholdLabel({ ...item, unit, low_stock_threshold: null })}).`
+        : `${item.name}: alerta si stock ≤ ${formatQuantity(parsedThreshold)} ${normalizeStockUnit(unit)}.`
+    );
   }
 
   function adjustStockDraft(item, delta) {
@@ -547,6 +639,11 @@ export default function StockManagerPanel({ restaurantId }) {
       return next;
     });
     setStockNameDraftById((prev) => {
+      const next = { ...prev };
+      delete next[item.id];
+      return next;
+    });
+    setStockThresholdDraftById((prev) => {
       const next = { ...prev };
       delete next[item.id];
       return next;
@@ -674,7 +771,7 @@ export default function StockManagerPanel({ restaurantId }) {
               updated_at: new Date().toISOString()
             }))
           )
-          .select("id, name, current_stock, unit, updated_at");
+          .select("id, name, current_stock, unit, low_stock_threshold, updated_at");
         if (missingStockError) throw missingStockError;
         if (Array.isArray(insertedStockItems) && insertedStockItems.length > 0) {
           setStockItems((prev) =>
@@ -927,6 +1024,14 @@ export default function StockManagerPanel({ restaurantId }) {
           Administrá ingredientes del inventario y recetas. El stock y los ingredientes se guardan en mayúsculas para
           evitar duplicados por formato.
         </p>
+        <button
+          type="button"
+          onClick={() => setActiveSection("alert")}
+          className="mt-3 rounded-lg border border-rose-500/50 bg-rose-600 px-4 py-2 text-sm font-semibold text-white shadow-sm shadow-rose-950/30 hover:bg-rose-500"
+        >
+          Alerta de stock
+          {lowStockItems.length > 0 ? ` (${lowStockItems.length})` : ""}
+        </button>
       </div>
 
       <div className="flex flex-wrap gap-3">
@@ -943,6 +1048,20 @@ export default function StockManagerPanel({ restaurantId }) {
         </button>
         <button
           type="button"
+          onClick={() => setActiveSection("alert")}
+          className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+            activeSection === "alert"
+              ? "bg-rose-600 text-white"
+              : lowStockItems.length > 0
+                ? "border border-rose-500/45 bg-rose-500/15 text-rose-200 hover:bg-rose-500/25"
+                : "border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
+          }`}
+        >
+          Alerta
+          {lowStockItems.length > 0 ? ` (${lowStockItems.length})` : ""}
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveSection("recipes")}
           className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
             activeSection === "recipes"
@@ -954,7 +1073,7 @@ export default function StockManagerPanel({ restaurantId }) {
         </button>
       </div>
 
-      {activeSection === "stock" ? (
+      {activeSection === "stock" && (
         <div className="space-y-4">
           <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
             <h3 className="text-sm font-semibold text-slate-200">Agregar ingrediente al stock</h3>
@@ -1071,6 +1190,20 @@ export default function StockManagerPanel({ restaurantId }) {
                     const qtyDirty =
                       Math.abs(parsedDraftValue - currentValue) >= EPSILON ||
                       normalizeStockUnit(draftUnit) !== normalizeStockUnit(item.unit);
+                    const parsedThreshold = parseLowStockThresholdForStorage(
+                      stockThresholdDraftById[item.id] ?? "",
+                      draftUnit
+                    );
+                    const dbThreshold =
+                      item.low_stock_threshold != null && item.low_stock_threshold !== ""
+                        ? parseQuantityValueByUnit(item.low_stock_threshold, draftUnit, 0)
+                        : null;
+                    const thresholdDirty = !(
+                      (parsedThreshold == null && dbThreshold == null) ||
+                      (parsedThreshold != null &&
+                        dbThreshold != null &&
+                        Math.abs(parsedThreshold - dbThreshold) < EPSILON)
+                    );
                     return (
                       <div
                         key={item.id}
@@ -1106,6 +1239,31 @@ export default function StockManagerPanel({ restaurantId }) {
                           <p className="text-xs text-slate-500">
                             Stock actual: {formatStockDisplay(currentValue, item.unit)}
                           </p>
+                          <label className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                            <span className="text-slate-500">Alerta si stock ≤</span>
+                            <input
+                              type="text"
+                              inputMode={draftUnit === "UNIDAD" ? "numeric" : "decimal"}
+                              value={stockThresholdDraftById[item.id] ?? ""}
+                              placeholder={
+                                defaultThresholdForUnit(draftUnit) != null
+                                  ? formatQuantity(defaultThresholdForUnit(draftUnit))
+                                  : ""
+                              }
+                              disabled={rowBusy}
+                              onChange={(e) =>
+                                setStockThresholdDraftById((prev) => ({
+                                  ...prev,
+                                  [item.id]: normalizeNumericInputByUnit(e.target.value, draftUnit)
+                                }))
+                              }
+                              className="h-9 w-24 rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100 disabled:opacity-50"
+                            />
+                            <span className="text-slate-500">{draftUnit}</span>
+                            <span className="text-slate-600">
+                              (vacío = default {formatStockThresholdLabel({ unit: draftUnit })})
+                            </span>
+                          </label>
                         </div>
 
                         <div className="flex w-full min-w-0 flex-wrap items-center gap-2 border-t border-slate-800/80 pt-1">
@@ -1167,7 +1325,7 @@ export default function StockManagerPanel({ restaurantId }) {
                           </select>
                           <button
                             type="button"
-                            disabled={rowBusy || (!nameDirty && !qtyDirty)}
+                            disabled={rowBusy || (!nameDirty && !qtyDirty && !thresholdDirty)}
                             onClick={() => {
                               void saveStockItemRow(item);
                             }}
@@ -1322,7 +1480,98 @@ export default function StockManagerPanel({ restaurantId }) {
             </div>
           </div>
         </div>
-      ) : (
+      )}
+
+      {activeSection === "alert" && (
+        <div className="rounded-xl border border-rose-500/35 bg-slate-900 p-4">
+          <h3 className="text-sm font-semibold text-rose-100">Alerta de stock</h3>
+          <p className="mt-1 text-xs text-slate-400">
+            Ingredientes con stock en o por debajo del umbral. {STOCK_ALERT_DEFAULTS_HINT} Podés personalizar el umbral
+            de cada ingrediente abajo.
+          </p>
+          {loadingStock ? (
+            <p className="mt-4 text-sm text-slate-500">Cargando stock…</p>
+          ) : lowStockItems.length === 0 ? (
+            <p className="mt-4 rounded-lg border border-emerald-500/30 bg-emerald-950/25 px-3 py-2 text-sm text-emerald-100/95">
+              No hay ingredientes por debajo de los umbrales de alerta.
+            </p>
+          ) : null}
+
+          <div className="mt-4 space-y-2">
+            <p className="text-xs font-medium text-slate-400">Umbrales por ingrediente</p>
+            {stockItems.length === 0 ? (
+              <p className="text-sm text-slate-500">No hay ingredientes en stock.</p>
+            ) : (
+              <ul className="space-y-2">
+                {stockItems.map((item) => {
+                  const unit = stockUnitDraftById[item.id] ?? normalizeStockUnit(item.unit);
+                  const current = parseQuantityValueByUnit(item.current_stock, unit, 0);
+                  const isLow = isStockItemLow({ ...item, unit });
+                  const defaultT = defaultThresholdForUnit(unit);
+                  const thresholdPlaceholder =
+                    defaultT != null ? formatQuantity(defaultT) : "";
+                  const rowBusy = savingStockId === item.id;
+                  return (
+                    <li
+                      key={item.id}
+                      className={`flex flex-col gap-2 rounded-lg border px-3 py-2.5 sm:flex-row sm:flex-wrap sm:items-center ${
+                        isLow
+                          ? "border-rose-500/35 bg-rose-500/10"
+                          : "border-slate-800 bg-slate-950/40"
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <span className="font-medium text-slate-100">{item.name}</span>
+                        <p className="mt-0.5 text-xs text-slate-500">
+                          Stock: {formatStockDisplay(current, unit)}
+                          {isLow ? (
+                            <span className="ml-1 font-medium text-rose-300">· bajo</span>
+                          ) : null}
+                        </p>
+                      </div>
+                      <label className="flex items-center gap-2 text-xs">
+                        <span className="text-slate-500 shrink-0">Alerta ≤</span>
+                        <input
+                          type="text"
+                          inputMode={unit === "UNIDAD" ? "numeric" : "decimal"}
+                          value={stockThresholdDraftById[item.id] ?? ""}
+                          placeholder={thresholdPlaceholder}
+                          disabled={rowBusy}
+                          onChange={(e) =>
+                            setStockThresholdDraftById((prev) => ({
+                              ...prev,
+                              [item.id]: normalizeNumericInputByUnit(e.target.value, unit)
+                            }))
+                          }
+                          className="h-9 w-24 rounded-lg border border-slate-700 bg-slate-950 px-2 text-sm text-slate-100 disabled:opacity-50"
+                        />
+                        <span className="text-slate-500">{normalizeStockUnit(unit)}</span>
+                      </label>
+                      <button
+                        type="button"
+                        disabled={rowBusy}
+                        onClick={() => void saveStockItemThreshold(item)}
+                        className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                      >
+                        {rowBusy ? "…" : "Guardar umbral"}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setActiveSection("stock")}
+            className="mt-4 rounded-lg border border-slate-600 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800"
+          >
+            Ir a Stock para reponer
+          </button>
+        </div>
+      )}
+
+      {activeSection === "recipes" && (
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
           <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">

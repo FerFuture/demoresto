@@ -36,6 +36,9 @@ alter table public.stock_items
   add column if not exists unit text not null default 'UNIDAD';
 
 alter table public.stock_items
+  add column if not exists low_stock_threshold numeric check (low_stock_threshold is null or low_stock_threshold >= 0);
+
+alter table public.stock_items
   alter column current_stock type numeric using current_stock::numeric;
 
 alter table public.stock_recipe_ingredients
