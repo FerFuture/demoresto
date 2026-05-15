@@ -3,6 +3,7 @@
  */
 import { useEffect, useState } from "react";
 import { supabase } from "../supabaseClient";
+import { resolvePublicDashboardBaseUrl } from "../lib/publicDashboardUrl";
 
 export default function MaestroPanel({
   restaurantId,
@@ -17,25 +18,41 @@ export default function MaestroPanel({
   statsEnabled,
   stockPanelEnabled,
   tableCount,
+  restaurantMetadata,
   loadingRestaurant,
   onServiceFlagsUpdated,
   onTableCountUpdated,
   onMesaQrModuleToggle,
   onWaiterFulfillmentSelectorToggle,
   onBotRuntimeSwitchesVisibleToggle,
-  onStockPanelToggle
+  onStockPanelToggle,
+  onPublicDashboardBaseUrlSave
 }) {
   const [savingDelivery, setSavingDelivery] = useState(false);
   const [savingTables, setSavingTables] = useState(false);
+  const [savingDashboardBase, setSavingDashboardBase] = useState(false);
   const [localError, setLocalError] = useState("");
   const [localOk, setLocalOk] = useState("");
   const [copyOk, setCopyOk] = useState("");
   const [tablesDraft, setTablesDraft] = useState(String(tableCount ?? 12));
+  const [dashboardBaseDraft, setDashboardBaseDraft] = useState("");
   const restartCommand = "docker compose restart restobot dashboard";
 
   useEffect(() => {
     setTablesDraft(String(tableCount ?? 12));
   }, [tableCount]);
+
+  useEffect(() => {
+    const stored =
+      restaurantMetadata &&
+      typeof restaurantMetadata === "object" &&
+      typeof restaurantMetadata.public_dashboard_base_url === "string"
+        ? restaurantMetadata.public_dashboard_base_url.trim()
+        : "";
+    setDashboardBaseDraft(stored);
+  }, [restaurantMetadata]);
+
+  const effectiveDashboardBase = resolvePublicDashboardBaseUrl(restaurantMetadata);
 
   async function setServiceFlag(field, nextEnabled, successText) {
     if (!restaurantId) {
@@ -115,6 +132,25 @@ export default function MaestroPanel({
     setLocalOk(nextEnabled ? "Carta y QR mesas habilitado." : "Carta y QR mesas deshabilitado.");
   }
 
+  async function saveDashboardBaseUrl() {
+    if (savingDelivery || savingTables || savingDashboardBase) return;
+    if (typeof onPublicDashboardBaseUrlSave !== "function") {
+      setLocalError("No se pudo guardar la URL base del panel.");
+      return;
+    }
+    setLocalError("");
+    setLocalOk("");
+    setSavingDashboardBase(true);
+    const result = await onPublicDashboardBaseUrlSave(dashboardBaseDraft);
+    setSavingDashboardBase(false);
+    if (!result?.ok) return;
+    setLocalOk(
+      result.value
+        ? `URL base guardada: ${result.value}`
+        : "URL base vacía: se usará VITE_PUBLIC_DASHBOARD_URL o el dominio del panel."
+    );
+  }
+
   async function setWaiterFulfillmentSelectorFlag(nextEnabled) {
     if (savingDelivery || savingTables) return;
     if (typeof onWaiterFulfillmentSelectorToggle !== "function") {
@@ -188,7 +224,7 @@ export default function MaestroPanel({
     }
   }
 
-  const busy = savingDelivery || savingTables || !restaurantId || loadingRestaurant;
+  const busy = savingDelivery || savingTables || savingDashboardBase || !restaurantId || loadingRestaurant;
 
   return (
     <section className="space-y-4">
@@ -213,6 +249,10 @@ export default function MaestroPanel({
           </li>
           <li>
             <strong>Carta y QR mesas:</strong> controla la pestaña específica del dashboard para gestión de QR por mesa.
+          </li>
+          <li>
+            <strong>URL base de QR:</strong> dominio que llevan los enlaces <code className="text-[11px]">/carta</code>{" "}
+            (solo editable acá, no en Carta y QR mesas).
           </li>
           <li>
             <strong>Gestor de stock:</strong> muestra/oculta la pestaña para administrar inventario y recetario.
@@ -597,6 +637,39 @@ export default function MaestroPanel({
                 On
               </span>
             </div>
+            </div>
+
+            <div className="rounded-lg border border-violet-500/25 bg-violet-950/20 p-4 space-y-3">
+              <div>
+                <p className="text-sm font-medium text-slate-200">URL base del panel (QR y carta)</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Dominio público sin barra final. Los QR usan esta URL +{" "}
+                  <code className="text-[11px]">/carta?mesa=…</code>. En Carta y QR mesas solo se muestra.
+                </p>
+              </div>
+              <label className="block space-y-1 text-sm">
+                <span className="text-slate-400">URL guardada (vacío = build o dominio actual)</span>
+                <input
+                  type="url"
+                  value={dashboardBaseDraft}
+                  onChange={(e) => setDashboardBaseDraft(e.target.value)}
+                  placeholder="Ej: https://demo.mesafood.shop"
+                  disabled={busy || savingDashboardBase}
+                  className="h-10 w-full max-w-xl rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 disabled:opacity-50"
+                  autoComplete="off"
+                />
+              </label>
+              <p className="text-xs text-slate-500">
+                En uso ahora: <span className="font-mono text-slate-300">{effectiveDashboardBase || "—"}</span>
+              </p>
+              <button
+                type="button"
+                disabled={busy || savingDashboardBase || !restaurantId}
+                onClick={() => void saveDashboardBaseUrl()}
+                className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
+              >
+                {savingDashboardBase ? "Guardando…" : "Guardar URL base"}
+              </button>
             </div>
 
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6">

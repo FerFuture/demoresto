@@ -34,6 +34,7 @@ import MesaQrLinksPanel from "../components/MesaQrLinksPanel";
 import StockManagerPanel from "../components/StockManagerPanel";
 import OrdersDateRangeCalendar from "../components/OrdersDateRangeCalendar";
 import { fetchRestaurantForDashboard } from "../lib/restaurantTenant";
+import { isValidPublicDashboardBaseUrl, normalizePublicDashboardBaseUrlInput } from "../lib/publicDashboardUrl";
 import { getSession } from "../lib/auth";
 import { WEEKDAY_OPTIONS } from "../lib/deliverySchedule";
 
@@ -924,6 +925,33 @@ export default function AdminApp({ onLogout }) {
     setRestaurantMetadata(nextMetadata);
     setMesaQrEnabled(Boolean(nextEnabled));
     return { ok: true };
+  }
+
+  async function savePublicDashboardBaseUrl(urlRaw) {
+    if (!restaurantId) {
+      setError("No hay restaurante cargado.");
+      return { ok: false };
+    }
+    const normalized = normalizePublicDashboardBaseUrlInput(urlRaw);
+    if (!isValidPublicDashboardBaseUrl(normalized)) {
+      setError("URL base inválida. Usá http:// o https:// (sin barra final).");
+      return { ok: false };
+    }
+    setError("");
+    const nextMetadata = {
+      ...(restaurantMetadata && typeof restaurantMetadata === "object" ? restaurantMetadata : {}),
+      public_dashboard_base_url: normalized || null
+    };
+    const { error: updateError } = await supabase
+      .from("restaurants")
+      .update({ metadata: nextMetadata })
+      .eq("id", restaurantId);
+    if (updateError) {
+      setError(`No se pudo guardar URL base del panel: ${updateError.message}`);
+      return { ok: false, error: updateError };
+    }
+    setRestaurantMetadata(nextMetadata);
+    return { ok: true, value: normalized };
   }
 
   async function setWaiterFulfillmentSelectorFlag(nextEnabled) {
@@ -2988,6 +3016,8 @@ export default function AdminApp({ onLogout }) {
             onWaiterFulfillmentSelectorToggle={setWaiterFulfillmentSelectorFlag}
             onBotRuntimeSwitchesVisibleToggle={setBotRuntimeSwitchesVisibleFlag}
             onStockPanelToggle={setStockPanelEnabledFlag}
+            restaurantMetadata={restaurantMetadata}
+            onPublicDashboardBaseUrlSave={savePublicDashboardBaseUrl}
           />
         ) : (
           <section className="space-y-4">

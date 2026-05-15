@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { jsPDF } from "jspdf";
 import QRCode from "qrcode";
 import { signMesaTableToken } from "../lib/mesaQrToken";
+import { resolvePublicDashboardBaseUrl } from "../lib/publicDashboardUrl";
 import { supabase } from "../supabaseClient";
 
 function normalizeBlockedMesaTables(value, maxTableCount = 500) {
@@ -23,10 +24,10 @@ export default function MesaQrLinksPanel({
   onRestaurantMetadataChange
 }) {
   const secret = String(import.meta.env.VITE_MESA_QR_SECRET || "").trim();
-  const defaultBase =
-    String(import.meta.env.VITE_PUBLIC_DASHBOARD_URL || "").trim() ||
-    (typeof window !== "undefined" ? window.location.origin : "");
-  const [baseUrl, setBaseUrl] = useState(defaultBase);
+  const baseUrl = useMemo(
+    () => resolvePublicDashboardBaseUrl(restaurantMetadata),
+    [restaurantMetadata]
+  );
   const [rows, setRows] = useState([]);
   const [previewTable, setPreviewTable] = useState(1);
   const [qrPreviewUrl, setQrPreviewUrl] = useState("");
@@ -263,18 +264,10 @@ export default function MesaQrLinksPanel({
         </p>
       </div>
 
-      <label className="block space-y-1 text-sm">
-        <span className="text-slate-400">URL base del panel (sin barra final)</span>
-        <input
-          value={baseUrl}
-          onChange={(e) => setBaseUrl(e.target.value)}
-          placeholder="Ej: https://tudominio.com o http://IP:5174"
-          className="h-10 w-full max-w-xl rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100"
-        />
-        <span className="block text-xs text-slate-500">
-          Podés definir <code className="text-[11px]">VITE_PUBLIC_DASHBOARD_URL</code> al construir el dashboard.
-        </span>
-      </label>
+      <div className="block space-y-1 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2.5 text-sm">
+        <span className="text-slate-400">URL base de los QR</span>
+        <p className="mt-1 break-all font-mono text-xs text-slate-200">{baseUrl || "—"}</p>
+      </div>
 
       {!secret ? (
         <p className="rounded-lg border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
