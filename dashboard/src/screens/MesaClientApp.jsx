@@ -174,8 +174,12 @@ export default function MesaClientApp() {
     }
   }
 
-  /** En Vercel no existe un backend auxiliar por puerto en el mismo hostname; evita timeouts inútiles. */
+  /** En Vercel/Netlify no existe un backend en hostname:puerto; evita timeouts inútiles. */
   function hostPortFallbackLikelyUseless() {
+    return isHostedOnVercelOrNetlify();
+  }
+
+  function isHostedOnVercelOrNetlify() {
     const h = String(window.location.hostname || "").toLowerCase();
     return h.endsWith(".vercel.app") || h.endsWith(".netlify.app");
   }
@@ -191,11 +195,19 @@ export default function MesaClientApp() {
     };
 
     const origin = window.location.origin.replace(/\/$/, "");
+    const onStaticHost = isHostedOnVercelOrNetlify();
 
-    // 1) Mismo origen (proxy /api/mesa/order en Vercel o backend embebido).
-    pushOrderUrl(origin);
-    pushOrderUrl(mesaApiBaseUrl);
-    pushOrderUrl(configuredApiBase);
+    // En Vercel/Netlify el pedido debe ir al proxy same-origin (HTTPS → backend HTTP en la VPS).
+    // En local, priorizar URL explícita del backend antes que el origin del dev server.
+    if (onStaticHost) {
+      pushOrderUrl(origin);
+      pushOrderUrl(mesaApiBaseUrl);
+      pushOrderUrl(configuredApiBase);
+    } else {
+      pushOrderUrl(mesaApiBaseUrl);
+      pushOrderUrl(configuredApiBase);
+      pushOrderUrl(origin);
+    }
 
     const hostBackendPort = `${window.location.protocol}//${window.location.hostname}:${configuredBackendPort}`;
     if (!hostPortFallbackLikelyUseless()) {
