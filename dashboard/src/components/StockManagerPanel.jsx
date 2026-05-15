@@ -1013,7 +1013,7 @@ export default function StockManagerPanel({ restaurantId }) {
             ) : null}
           </div>
 
-          <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(300px,0.82fr)]">
             <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -1074,42 +1074,41 @@ export default function StockManagerPanel({ restaurantId }) {
                     return (
                       <div
                         key={item.id}
-                        className="flex flex-col gap-3 rounded-xl border border-slate-800 bg-slate-950/40 p-3 lg:flex-row lg:items-center lg:justify-between"
+                        className="flex flex-col gap-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4"
                       >
-                        <div className="min-w-0 flex-1 space-y-2">
-                          <div className="block min-w-0">
-                            <span className="text-[11px] text-slate-500">Nombre</span>
-                            {editingName ? (
-                              <input
-                                type="text"
-                                value={nameDraftValue}
-                                onChange={(event) =>
-                                  setStockNameDraftById((prev) => ({
-                                    ...prev,
-                                    [item.id]: normalizeUppercaseText(event.target.value)
-                                  }))
-                                }
-                                disabled={rowBusy}
-                                autoFocus
-                                className="mt-0.5 h-10 w-full max-w-md rounded-lg border border-sky-500/50 bg-slate-950 px-3 text-sm font-medium text-slate-100 outline-none ring-1 ring-sky-500/30 disabled:opacity-50"
-                                autoComplete="off"
-                              />
-                            ) : (
-                              <div
-                                className="mt-0.5 flex h-10 w-full max-w-md cursor-default items-center rounded-lg border border-slate-700 bg-slate-950/80 px-3 text-sm font-medium text-slate-100 select-none"
-                                tabIndex={-1}
-                                aria-readonly="true"
-                              >
-                                {nameDraftValue || "—"}
-                              </div>
-                            )}
-                          </div>
+                        <div className="min-w-0 w-full space-y-1.5">
+                          <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                            Nombre
+                          </span>
+                          {editingName ? (
+                            <input
+                              type="text"
+                              value={nameDraftValue}
+                              onChange={(event) =>
+                                setStockNameDraftById((prev) => ({
+                                  ...prev,
+                                  [item.id]: normalizeUppercaseText(event.target.value)
+                                }))
+                              }
+                              disabled={rowBusy}
+                              autoFocus
+                              className="h-10 w-full rounded-lg border border-sky-500/50 bg-slate-950 px-3 text-sm font-medium text-slate-100 outline-none ring-1 ring-sky-500/30 disabled:opacity-50"
+                              autoComplete="off"
+                            />
+                          ) : (
+                            <p
+                              className="text-sm font-semibold leading-snug text-slate-100 break-words"
+                              title={nameDraftValue || undefined}
+                            >
+                              {nameDraftValue || "—"}
+                            </p>
+                          )}
                           <p className="text-xs text-slate-500">
                             Stock actual: {formatStockDisplay(currentValue, item.unit)}
                           </p>
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-2">
+                        <div className="flex w-full min-w-0 flex-wrap items-center gap-2 border-t border-slate-800/80 pt-1">
                           <button
                             type="button"
                             disabled={rowBusy || parsedDraftValue <= 0}
