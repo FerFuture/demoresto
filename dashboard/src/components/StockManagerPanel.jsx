@@ -144,6 +144,11 @@ function stockAiBaseAllowedFromBrowser(baseRaw) {
   }
 }
 
+function isHostedOnVercelOrNetlify() {
+  const h = String(window.location.hostname || "").toLowerCase();
+  return h.endsWith(".vercel.app") || h.endsWith(".netlify.app");
+}
+
 function buildStockAiCandidates() {
   const candidates = [];
   const pushCandidate = (baseRaw) => {
@@ -154,10 +159,17 @@ function buildStockAiCandidates() {
   const origin = window.location.origin.replace(/\/$/, "");
   const configuredBase = String(import.meta.env.VITE_STOCK_AI_BASE_URL || import.meta.env.VITE_MESA_API_BASE_URL || "").trim();
   const configuredBackendPort = String(import.meta.env.VITE_BACKEND_PORT || "").trim() || "3000";
-  pushCandidate(origin);
-  pushCandidate(configuredBase);
-  const hostBackendPort = `${window.location.protocol}//${window.location.hostname}:${configuredBackendPort}`;
-  pushCandidate(hostBackendPort);
+  const onStaticHost = isHostedOnVercelOrNetlify();
+
+  if (onStaticHost) {
+    pushCandidate(origin);
+    pushCandidate(configuredBase);
+  } else {
+    pushCandidate(configuredBase);
+    pushCandidate(origin);
+    const hostBackendPort = `${window.location.protocol}//${window.location.hostname}:${configuredBackendPort}`;
+    pushCandidate(hostBackendPort);
+  }
   return [...new Set(candidates)];
 }
 
