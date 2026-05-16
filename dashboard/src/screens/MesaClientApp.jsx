@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useSearchParams, useLocation, matchPath } from "react-router-dom";
+import { useParams, useSearchParams, useLocation } from "react-router-dom";
 import { supabase } from "../supabaseClient";
 import { resolveRestaurantForDashboard } from "../lib/restaurantTenant";
 import { useDemoTenant } from "../lib/DemoTenantContext";
@@ -83,7 +83,9 @@ export default function MesaClientApp() {
   const location = useLocation();
   const mesaTokenFromUrl = String(searchParams.get("t") || "").trim();
 
-  const cartaRoute = Boolean(matchPath("/carta", location.pathname));
+  const pathnameNorm = String(location.pathname || "").replace(/\/+$/, "") || "/";
+  /** `/carta` (legado) o `/d/{slug}/carta` (demo): el número de mesa va en `?mesa=`. */
+  const cartaRoute = pathnameNorm === "/carta" || pathnameNorm.endsWith("/carta");
 
   const parsedTableNumber = useMemo(() => {
     if (cartaRoute) {
