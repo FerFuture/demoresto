@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../supabaseClient";
-import { fetchRestaurantForDashboard } from "../lib/restaurantTenant";
+import { resolveRestaurantForDashboard } from "../lib/restaurantTenant";
+import { useDemoTenant } from "../lib/DemoTenantContext";
 import {
   formatDateTime,
   groupOrderItemRows,
@@ -17,6 +18,7 @@ import {
 const HISTORY_HOURS = 18;
 
 export default function KitchenApp({ onLogout }) {
+  const { demoSlug } = useDemoTenant();
   const [restaurantId, setRestaurantId] = useState("");
   const [restaurantName, setRestaurantName] = useState("");
   const [orders, setOrders] = useState([]);
@@ -25,7 +27,7 @@ export default function KitchenApp({ onLogout }) {
 
   useEffect(() => {
     async function loadRestaurant() {
-      const { data, error: queryError } = await fetchRestaurantForDashboard(supabase);
+      const { data, error: queryError } = await resolveRestaurantForDashboard(supabase, { demoSlug });
       if (queryError) {
         setError(`Error resolviendo restaurante: ${queryError.message}`);
         return;
@@ -38,7 +40,7 @@ export default function KitchenApp({ onLogout }) {
       setRestaurantName(data.name || "");
     }
     loadRestaurant();
-  }, []);
+  }, [demoSlug]);
 
   useEffect(() => {
     if (!restaurantId) return undefined;

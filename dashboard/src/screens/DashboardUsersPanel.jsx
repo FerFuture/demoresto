@@ -50,7 +50,8 @@ function WeekdayToggle({ value, onChange, disabled }) {
   );
 }
 
-export default function DashboardUsersPanel() {
+export default function DashboardUsersPanel({ restaurantId = "", scopeByRestaurant = false }) {
+  const rid = String(restaurantId || "").trim();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -69,12 +70,20 @@ export default function DashboardUsersPanel() {
   const loadUsers = useCallback(async () => {
     setError("");
     setLoading(true);
-    const { data, error: qErr } = await supabase
+    if (scopeByRestaurant && !rid) {
+      setRows([]);
+      setLoading(false);
+      return;
+    }
+    let q = supabase
       .from(TABLE)
       .select(
         "id, username, role, label, is_active, delivery_work_weekdays, created_at, updated_at"
-      )
-      .order("created_at", { ascending: false });
+      );
+    if (scopeByRestaurant && rid) {
+      q = q.eq("restaurant_id", rid);
+    }
+    const { data, error: qErr } = await q.order("created_at", { ascending: false });
     setLoading(false);
     if (qErr) {
       setError(
@@ -86,7 +95,7 @@ export default function DashboardUsersPanel() {
       return;
     }
     setRows(data || []);
-  }, []);
+  }, [scopeByRestaurant, rid]);
 
   useEffect(() => {
     loadUsers();
@@ -95,6 +104,10 @@ export default function DashboardUsersPanel() {
   async function handleCreate(event) {
     event.preventDefault();
     setError("");
+    if (scopeByRestaurant && !rid) {
+      setError("Todavía no está cargado el restaurante.");
+      return;
+    }
     const u = newUser.username.trim().toLowerCase();
     if (!USERNAME_RE.test(u)) {
       setError("Usuario: 3–40 caracteres, solo minúsculas, números, . _ -");
@@ -120,7 +133,7 @@ export default function DashboardUsersPanel() {
       return;
     }
     setSavingId("__new__");
-    const { error: insErr } = await supabase.from(TABLE).insert({
+    const insertRow = {
       username: u,
       password_hash: hash,
       role: newUser.role,
@@ -131,7 +144,11 @@ export default function DashboardUsersPanel() {
           ? deliveryWeekdaysToDb("delivery", newUser.deliveryWeekdays)
           : null,
       updated_at: new Date().toISOString()
-    });
+    };
+    if (scopeByRestaurant && rid) {
+      insertRow.restaurant_id = rid;
+    }
+    const { error: insErr } = await supabase.from(TABLE).insert(insertRow);
     setSavingId(null);
     if (insErr) {
       setError(
@@ -242,8 +259,13 @@ export default function DashboardUsersPanel() {
       <div className="rounded-xl border border-slate-700 bg-slate-900 p-5">
         <h2 className="text-sm font-semibold text-slate-200">Usuarios del panel</h2>
         <p className="mt-1 text-xs text-slate-400">
-          Altas para admin, encargado, cocina, mozo o reparto. Para reparto, elegí los días en que puede iniciar sesión cada
-          usuario.
+          Altas para admin, encargado, cocina, mozo o reparto. Para reparto, elegí los días en que puede iniciar sesión
+          cada usuario.
+          {scopeByRestaurant ? (
+            <span className="block mt-2 text-amber-200/90">
+              Modo demo: los usuarios se guardan solo para este restaurante (mismo enlace /d/…/login).
+            </span>
+          ) : null}
         </p>
       </div>
 
@@ -260,6 +282,9 @@ export default function DashboardUsersPanel() {
         <h3 className="md:col-span-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
           Nuevo usuario
         </h3>
+        {scopeByRestaurant && !rid ? (
+          <p className="md:col-span-2 text-sm text-amber-200/90">Cargando restaurante…</p>
+        ) : null}
         <label className="space-y-1 text-sm">
           <span className="text-slate-300">Usuario</span>
           <input

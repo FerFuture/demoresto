@@ -4,6 +4,7 @@ import QRCode from "qrcode";
 import { signMesaTableToken } from "../lib/mesaQrToken";
 import { resolvePublicDashboardBaseUrl } from "../lib/publicDashboardUrl";
 import { supabase } from "../supabaseClient";
+import { useDemoTenant } from "../lib/DemoTenantContext";
 
 function normalizeBlockedMesaTables(value, maxTableCount = 500) {
   if (!Array.isArray(value)) return [];
@@ -13,16 +14,22 @@ function normalizeBlockedMesaTables(value, maxTableCount = 500) {
 }
 
 /**
- * Gestión de URLs del panel cliente por mesa (para QR). Misma ruta /carta para todos;
- * la mesa va en ?mesa=N y el token en ?t=... Visible en Admin (menú) y Maestro.
+ * URLs del QR por mesa: `/d/{slug}/carta?mesa=N` en demos; `/carta?mesa=N` en despliegue legado.
  */
 export default function MesaQrLinksPanel({
   restaurantId,
   tableCount,
   qrModuleEnabled,
   restaurantMetadata,
-  onRestaurantMetadataChange
+  onRestaurantMetadataChange,
+  fallbackDemoSlug = ""
 }) {
+  const { demoSlug: slugFromRoute } = useDemoTenant();
+  const pathSlug = String(slugFromRoute || fallbackDemoSlug || "")
+    .trim()
+    .toLowerCase();
+  const cartaPath = pathSlug ? `/d/${pathSlug}/carta` : "/carta";
+
   const secret = String(import.meta.env.VITE_MESA_QR_SECRET || "").trim();
   const baseUrl = useMemo(
     () => resolvePublicDashboardBaseUrl(restaurantMetadata),
@@ -70,7 +77,7 @@ export default function MesaQrLinksPanel({
     (async () => {
       const out = [];
       for (let table = 1; table <= n; table += 1) {
-        let url = `${base}/carta?mesa=${encodeURIComponent(String(table))}`;
+        let url = `${base}${cartaPath}?mesa=${encodeURIComponent(String(table))}`;
         if (secret) {
           const tok = await signMesaTableToken(rid, table, secret);
           if (tok) url += `&t=${encodeURIComponent(tok)}`;
@@ -83,7 +90,7 @@ export default function MesaQrLinksPanel({
     return () => {
       cancelled = true;
     };
-  }, [restaurantId, n, baseUrl, secret, qrModuleEnabled]);
+  }, [restaurantId, n, baseUrl, secret, qrModuleEnabled, cartaPath]);
 
   useEffect(() => {
     let cancelled = false;
@@ -261,10 +268,13 @@ export default function MesaQrLinksPanel({
       <div>
         <h3 className="text-sm font-semibold text-slate-200">Carta y QR por mesa</h3>
         <p className="mt-1 text-xs text-slate-500 leading-relaxed">
-          Todos los clientes usan la misma ruta <code className="rounded bg-slate-950 px-1 text-[11px] text-violet-200">/carta</code>
-          ; cada QR añade <code className="rounded bg-slate-950 px-1 text-[11px] text-violet-200">mesa</code> y, si está
-          configurado, un token para que el pedido a cocina quede en esa mesa. La ruta antigua{" "}
-          <code className="rounded bg-slate-950 px-1 text-[11px] text-slate-400">/mesa/N</code> sigue funcionando.
+          Cada QR usa la ruta{" "}
+          <code className="rounded bg-slate-950 px-1 text-[11px] text-violet-200">{cartaPath}</code>
+          ; el parámetro <code className="rounded bg-slate-950 px-1 text-[11px] text-violet-200">mesa</code> y, si está
+          configurado, el token anclan el pedido a la mesa correcta. En demos el slug forma parte de la URL (
+          <code className="text-[11px] text-slate-400">/d/…/carta</code>). La ruta antigua{" "}
+          <code className="rounded bg-slate-950 px-1 text-[11px] text-slate-400">/mesa/N</code> puede seguir en uso según
+          el deploy.
         </p>
       </div>
 

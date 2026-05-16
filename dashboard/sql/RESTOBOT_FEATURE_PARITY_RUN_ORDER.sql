@@ -5,11 +5,16 @@
 -- 2) dashboard_users_role_encargado.sql
 -- 3) restaurants_config_columns.sql
 -- 4) stock_manager_tables.sql
--- 5) rls_policies_restobot.sql
--- 6) grants_api_roles_restobot.sql
--- 7) rls_step2_verify.sql
+-- 5) demo_multi_tenant.sql  (demos por /d/{slug}/… — repo demo)
+--    Luego, por cada cliente: dashboard/sql/demo_provision_new_demo.sql (clonar plantilla)
+-- 6) rls_policies_restobot.sql
+-- 6b) Opcional: dashboard/sql/rls_phase3_security_notes.sql (auditoría RLS; no cambia políticas)
+-- 7) grants_api_roles_restobot.sql
+-- 8) rls_step2_verify.sql
 --
 -- Notas:
+-- - `demo_cleanup_expired.sql` es una plantilla manual para borrar datos de demos vencidos (no obligatorio).
+-- - `demo_cleanup_expired_runbook.sql` — pasos 4.1/4.2 (inventario, estrategia, ejemplo pg_cron).
 -- - `menu_seed_resto_illimani.sql` NO es parte obligatoria de la paridad funcional de restobot;
 --   solo sirve si querés sembrar el menú del cliente Illimani.
 -- - Si alguna tabla/columna ya existe, estos SQL son mayormente idempotentes y deberían re-ejecutarse sin problema.

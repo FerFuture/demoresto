@@ -16,7 +16,9 @@ const {
   saveOrder,
   getOrderAwaitingCustomerTotalConfirm,
   updateOrderMatching,
-  getRestaurantNameById
+  getRestaurantNameById,
+  createDemoFromTemplate,
+  verifyDashboardUserCredentials
 } = require("./database");
 const { startOrderDeliveryNotifier } = require("./order_delivery_notifier");
 const { startPaymentStatusPoller } = require("./payment_status_poller");
@@ -62,7 +64,11 @@ async function readJsonBody(req, { maxBytes = 1_000_000 } = {}) {
   }
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw) return null;
-  return JSON.parse(raw);
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`JSON inválido: ${e?.message || e}`);
+  }
 }
 
 function sendJson(res, statusCode, payload) {
@@ -80,7 +86,13 @@ const MESA_API_PORT = Number(process.env.MESA_API_PORT || 3000);
 const MESA_ORDER_PATH = "/api/mesa/order";
 const DASHBOARD_PASSWORD_VERIFY_PATH = "/api/dashboard/password/verify";
 const DASHBOARD_PASSWORD_HASH_PATH = "/api/dashboard/password/hash";
+const DASHBOARD_DB_LOGIN_PATH = "/api/dashboard/db-login";
 const DASHBOARD_STOCK_RECIPE_AI_PATH = "/api/dashboard/stock/recipe-ai";
+const MAESTRO_CREATE_DEMO_PATH = "/api/maestro/create-demo";
+/** Contraseña del panel Maestro (servidor). Preferí MAESTRO_PASSWORD; si no, se acepta VITE_MAESTRO_PASSWORD del mismo .env. */
+const MAESTRO_PASSWORD_EXPECTED = String(
+  process.env.MAESTRO_PASSWORD || process.env.VITE_MAESTRO_PASSWORD || ""
+).trim();
 /** Misma cadena que `VITE_MESA_QR_SECRET` en el dashboard: si está definida, exige `mesaToken` en POST /api/mesa/order */
 const MESA_QR_SECRET = String(process.env.MESA_QR_SECRET || "").trim();
 
@@ -145,17 +157,24 @@ const mesaApiServer = http.createServer(async (req, res) => {
     if (req.method !== "POST") return sendJson(res, 405, { error: "Método no permitido" });
 
     const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
-    const pathName = url.pathname;
+    const pathName = String(url.pathname || "/").replace(/\/+$/, "") || "/";
     if (
       pathName !== MESA_ORDER_PATH &&
       pathName !== DASHBOARD_PASSWORD_VERIFY_PATH &&
       pathName !== DASHBOARD_PASSWORD_HASH_PATH &&
-      pathName !== DASHBOARD_STOCK_RECIPE_AI_PATH
+      pathName !== DASHBOARD_DB_LOGIN_PATH &&
+      pathName !== DASHBOARD_STOCK_RECIPE_AI_PATH &&
+      pathName !== MAESTRO_CREATE_DEMO_PATH
     ) {
       return sendJson(res, 404, { error: "Not found" });
     }
 
-    const body = await readJsonBody(req);
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (parseErr) {
+      return sendJson(res, 400, { error: parseErr?.message || "Cuerpo inválido" });
+    }
     if (!body || typeof body !== "object") return sendJson(res, 400, { error: "JSON inválido" });
 
     if (pathName === DASHBOARD_PASSWORD_VERIFY_PATH) {
@@ -183,6 +202,27 @@ const mesaApiServer = http.createServer(async (req, res) => {
       return sendJson(res, 200, { passwordHash });
     }
 
+    if (pathName === DASHBOARD_DB_LOGIN_PATH) {
+      const username = String(body.username || "");
+      const password = String(body.password ?? "");
+      const ridRaw = body.restaurantId;
+      let restaurantId = null;
+      if (ridRaw !== null && ridRaw !== undefined && String(ridRaw).trim() !== "") {
+        const s = String(ridRaw).trim();
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) {
+          return sendJson(res, 400, { ok: false, error: "restaurantId no es un UUID válido." });
+        }
+        restaurantId = s;
+      }
+      try {
+        const result = await verifyDashboardUserCredentials({ username, password, restaurantId });
+        return sendJson(res, 200, result);
+      } catch (e) {
+        console.error("[mesa-api] db-login", e);
+        return sendJson(res, 500, { ok: false, error: e?.message || "Error interno" });
+      }
+    }
+
     if (pathName === DASHBOARD_STOCK_RECIPE_AI_PATH) {
       const text = String(body.text || "").trim();
       if (!text) return sendJson(res, 400, { error: "Falta text" });
@@ -191,6 +231,34 @@ const mesaApiServer = http.createServer(async (req, res) => {
         return sendJson(res, 200, { recipe });
       } catch (error) {
         return sendJson(res, 500, { error: error?.message || "No se pudo analizar la receta" });
+      }
+    }
+
+    if (pathName === MAESTRO_CREATE_DEMO_PATH) {
+      if (!MAESTRO_PASSWORD_EXPECTED) {
+        return sendJson(res, 503, {
+          error: "Servidor sin MAESTRO_PASSWORD (o VITE_MAESTRO_PASSWORD) configurada. No se puede provisionar demos."
+        });
+      }
+      const maestroPassword = String(body.maestroPassword || "");
+      if (!maestroPassword || maestroPassword !== MAESTRO_PASSWORD_EXPECTED) {
+        return sendJson(res, 403, { error: "Contraseña maestro incorrecta." });
+      }
+      try {
+        const result = await createDemoFromTemplate({
+          templateRestaurantId: body.templateRestaurantId,
+          demoSlug: body.demoSlug,
+          demoName: body.demoName,
+          expiresDays: body.expiresDays,
+          adminUsername: body.adminUsername,
+          adminPassword: body.adminPassword,
+          demoWhatsappNumber: body.demoWhatsappNumber
+        });
+        return sendJson(res, 200, result);
+      } catch (error) {
+        const msg = error?.message || String(error);
+        const code = msg.includes("ya existe") ? 409 : 400;
+        return sendJson(res, code, { error: msg });
       }
     }
 
@@ -308,12 +376,18 @@ const mesaApiServer = http.createServer(async (req, res) => {
 
     return sendJson(res, 200, { orderId: order.id, paymentLink });
   } catch (err) {
-    return sendJson(res, 500, { error: err?.message || "Error interno" });
+    console.error("[mesa-api]", err);
+    const msg = err?.message || String(err || "Error interno");
+    if (!res.headersSent) {
+      return sendJson(res, 500, { error: msg });
+    }
   }
 });
 
 mesaApiServer.listen(MESA_API_PORT, "0.0.0.0", () => {
-  console.log(`[mesa-api] escuchando en puerto ${MESA_API_PORT} · POST ${MESA_ORDER_PATH}`);
+  console.log(
+    `[mesa-api] escuchando en puerto ${MESA_API_PORT} · POST ${MESA_ORDER_PATH}, ${MAESTRO_CREATE_DEMO_PATH}, ${DASHBOARD_DB_LOGIN_PATH}, ${DASHBOARD_PASSWORD_VERIFY_PATH}, ${DASHBOARD_STOCK_RECIPE_AI_PATH}`
+  );
 });
 
 /**

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../supabaseClient";
 import { getSession } from "../lib/auth";
-import { fetchRestaurantForDashboard } from "../lib/restaurantTenant";
+import { resolveRestaurantForDashboard } from "../lib/restaurantTenant";
+import { useDemoTenant } from "../lib/DemoTenantContext";
 import {
   currency,
   formatDateTime,
@@ -93,6 +94,7 @@ function cartTotal(cartById, menuById) {
 }
 
 export default function WaiterApp({ onLogout }) {
+  const { demoSlug } = useDemoTenant();
   const [restaurantId, setRestaurantId] = useState("");
   const [restaurantName, setRestaurantName] = useState("");
   const [botNumber, setBotNumber] = useState("");
@@ -150,7 +152,7 @@ export default function WaiterApp({ onLogout }) {
 
   useEffect(() => {
     async function loadRestaurant() {
-      const { data, error: queryError } = await fetchRestaurantForDashboard(supabase);
+      const { data, error: queryError } = await resolveRestaurantForDashboard(supabase, { demoSlug });
       if (queryError) {
         setError(`Error resolviendo restaurante: ${queryError.message}`);
         return;
@@ -169,7 +171,7 @@ export default function WaiterApp({ onLogout }) {
       setWaiterFulfillmentSelectorEnabled(metadataObj.waiter_fulfillment_selector_enabled === true);
     }
     loadRestaurant();
-  }, []);
+  }, [demoSlug]);
 
   useEffect(() => {
     if (waiterFulfillmentSelectorEnabled) return;

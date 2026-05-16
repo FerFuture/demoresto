@@ -1,7 +1,15 @@
 import { useState } from "react";
+import { useParams } from "react-router-dom";
 import { login } from "../lib/auth";
 
-export default function Login({ onLoggedIn, sessionNotice = "" }) {
+/**
+ * @param {{ onLoggedIn?: (s: object) => void, sessionNotice?: string, demoSlugFromRoute?: boolean }} props
+ * Si `demoSlugFromRoute`, toma el slug de `/d/:demoSlug/login`.
+ */
+export default function Login({ onLoggedIn, sessionNotice = "", demoSlugFromRoute = false }) {
+  const { demoSlug: slugFromUrl } = useParams();
+  const effectiveSlug = demoSlugFromRoute ? String(slugFromUrl || "").trim() : "";
+
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -16,7 +24,8 @@ export default function Login({ onLoggedIn, sessionNotice = "" }) {
     try {
       const result = await login({
         password,
-        username: usernameTrim || undefined
+        username: usernameTrim || undefined,
+        demoSlug: effectiveSlug || undefined
       });
       if (!result.ok) {
         setError(result.error || "No se pudo iniciar sesión.");
@@ -34,7 +43,22 @@ export default function Login({ onLoggedIn, sessionNotice = "" }) {
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold tracking-tight">RestoBot</h1>
-          <p className="mt-1 text-sm text-slate-400">Usuario y contraseña, o solo contraseña de acceso</p>
+          <p className="mt-1 text-sm text-slate-400">
+            {effectiveSlug ? (
+              <>
+                Demo <span className="font-mono text-emerald-400/90">{effectiveSlug}</span> — usuario y contraseña,
+                o solo contraseña de acceso
+              </>
+            ) : (
+              "Usuario y contraseña, o solo contraseña de acceso"
+            )}
+          </p>
+          {(effectiveSlug ||
+            String(import.meta.env.VITE_DEMO_LEGAL_BANNER || "").trim() === "1") && (
+            <p className="mt-4 max-w-md mx-auto rounded-lg border border-slate-700/80 bg-slate-900/60 px-3 py-2 text-[11px] leading-relaxed text-slate-400">
+              Entorno de demostración: datos de prueba, sin SLA; pueden borrase o resetearse en cualquier momento.
+            </p>
+          )}
         </div>
 
         <form

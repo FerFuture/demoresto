@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams, useLocation, matchPath } from "react-router-dom";
 import { supabase } from "../supabaseClient";
-import { fetchRestaurantForDashboard } from "../lib/restaurantTenant";
+import { resolveRestaurantForDashboard } from "../lib/restaurantTenant";
+import { useDemoTenant } from "../lib/DemoTenantContext";
 import { currency } from "../lib/format";
 
 function buildCartLines(cartById, menuById) {
@@ -76,6 +77,7 @@ const MESA_QR_TOKEN_REQUIRED = true;
 const API_REQUEST_TIMEOUT_MS = 15000;
 
 export default function MesaClientApp() {
+  const { demoSlug } = useDemoTenant();
   const { tableNumber } = useParams();
   const [searchParams] = useSearchParams();
   const location = useLocation();
@@ -239,7 +241,7 @@ export default function MesaClientApp() {
       setLoading(true);
       setError("");
       try {
-        const { data, error: queryError } = await fetchRestaurantForDashboard(supabase);
+        const { data, error: queryError } = await resolveRestaurantForDashboard(supabase, { demoSlug });
         if (queryError) throw queryError;
         if (!data) {
           setError("No se encontró el restaurante para este panel.");
@@ -269,7 +271,7 @@ export default function MesaClientApp() {
       setLoading(false);
     }
     run();
-  }, []);
+  }, [demoSlug]);
 
   useEffect(() => {
     if (!restaurantId) return;

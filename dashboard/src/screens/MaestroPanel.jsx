@@ -1,9 +1,38 @@
 /**
  * Panel solo visible para sesión `role === "maestro"` (contraseña VITE_MAESTRO_PASSWORD).
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../supabaseClient";
 import { resolvePublicDashboardBaseUrl } from "../lib/publicDashboardUrl";
+import { buildRestobotHttpApiCandidates } from "../lib/restobotHttpApi";
+
+const MAESTRO_CREATE_DEMO_PATH = "/api/maestro/create-demo";
+const DEMO_CREATE_TIMEOUT_MS = 45000;
+
+function readDefaultDemoExpiresDaysFromEnv() {
+  const raw = String(import.meta.env.VITE_DEFAULT_DEMO_EXPIRES_DAYS || "").trim();
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return 14;
+  return Math.min(366, Math.max(1, n));
+}
+
+async function fetchWithTimeout(url, options, timeoutMs = DEMO_CREATE_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+/** Texto en el selector de plantilla (nombre público + interno si difieren). */
+function formatRestaurantTemplateLabel(r) {
+  const name = String(r.name || "").trim();
+  const pub = String(r.public_name || "").trim();
+  if (pub && name && pub !== name) return `${pub} — ${name}`;
+  return pub || name || "Sin nombre";
+}
 
 export default function MaestroPanel({
   restaurantId,
@@ -36,6 +65,20 @@ export default function MaestroPanel({
   const [localError, setLocalError] = useState("");
   const [localOk, setLocalOk] = useState("");
   const [copyOk, setCopyOk] = useState("");
+  const [demoTemplateId, setDemoTemplateId] = useState("");
+  const [demoSlug, setDemoSlug] = useState("");
+  const [demoDisplayName, setDemoDisplayName] = useState("");
+  const [demoExpiresDays, setDemoExpiresDays] = useState(() => String(readDefaultDemoExpiresDaysFromEnv()));
+  const [demoAdminUser, setDemoAdminUser] = useState("");
+  const [demoAdminPass, setDemoAdminPass] = useState("");
+  const [demoWhatsapp, setDemoWhatsapp] = useState("");
+  const [demoMaestroPass, setDemoMaestroPass] = useState("");
+  const [demoCreating, setDemoCreating] = useState(false);
+  const [demoError, setDemoError] = useState("");
+  const [demoOk, setDemoOk] = useState(null);
+  const [templateOptions, setTemplateOptions] = useState([]);
+  const [templateListLoading, setTemplateListLoading] = useState(true);
+  const [templateListError, setTemplateListError] = useState("");
   const [tablesDraft, setTablesDraft] = useState(String(tableCount ?? 12));
   const [dashboardBaseDraft, setDashboardBaseDraft] = useState("");
   const restartCommand = "docker compose restart restobot dashboard";
@@ -43,6 +86,54 @@ export default function MaestroPanel({
   useEffect(() => {
     setTablesDraft(String(tableCount ?? 12));
   }, [tableCount]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setTemplateListLoading(true);
+      setTemplateListError("");
+      const { data, error } = await supabase
+        .from("restaurants")
+        .select("id, name, public_name, demo_slug")
+        .order("name");
+      if (cancelled) return;
+      setTemplateListLoading(false);
+      if (error) {
+        setTemplateListError(error.message);
+        setTemplateOptions([]);
+        return;
+      }
+      const rows = data || [];
+      const counts = new Map();
+      for (const r of rows) {
+        const lab = formatRestaurantTemplateLabel(r);
+        counts.set(lab, (counts.get(lab) || 0) + 1);
+      }
+      const opts = rows.map((r) => {
+        const baseLabel = formatRestaurantTemplateLabel(r);
+        const dup = (counts.get(baseLabel) || 0) > 1;
+        const demoSlug = String(r.demo_slug ?? "")
+          .trim()
+          .toLowerCase();
+        return {
+          id: r.id,
+          label: dup ? `${baseLabel} · ${String(r.id).slice(0, 8)}…` : baseLabel,
+          demoSlug: demoSlug || null
+        };
+      });
+      opts.sort((a, b) => a.label.localeCompare(b.label, "es", { sensitivity: "base" }));
+      setTemplateOptions(opts);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!restaurantId || templateOptions.length === 0) return;
+    const found = templateOptions.some((o) => o.id === restaurantId);
+    if (found) setDemoTemplateId(String(restaurantId));
+  }, [restaurantId, templateOptions]);
 
   useEffect(() => {
     const stored =
@@ -55,6 +146,20 @@ export default function MaestroPanel({
   }, [restaurantMetadata]);
 
   const effectiveDashboardBase = resolvePublicDashboardBaseUrl(restaurantMetadata);
+
+  const selectedTemplateOption = useMemo(
+    () => templateOptions.find((o) => o.id === demoTemplateId) ?? null,
+    [templateOptions, demoTemplateId]
+  );
+  const templateDemoLoginUrl = useMemo(() => {
+    const slug = selectedTemplateOption?.demoSlug;
+    if (!slug) return "";
+    const base = String(effectiveDashboardBase || (typeof window !== "undefined" ? window.location.origin : "") || "")
+      .trim()
+      .replace(/\/$/, "");
+    if (!base) return "";
+    return `${base}/d/${encodeURIComponent(slug)}/login`;
+  }, [selectedTemplateOption, effectiveDashboardBase]);
 
   async function setServiceFlag(field, nextEnabled, successText) {
     if (!restaurantId) {
@@ -244,7 +349,139 @@ export default function MaestroPanel({
     }
   }
 
-  const busy = savingDelivery || savingTables || savingDashboardBase || !restaurantId || loadingRestaurant;
+  async function copyText(text, okMessage) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyOk(okMessage || "Copiado.");
+      setTimeout(() => setCopyOk(""), 2500);
+    } catch (_) {
+      setCopyOk("No se pudo copiar.");
+      setTimeout(() => setCopyOk(""), 2500);
+    }
+  }
+
+  async function submitCreateDemo() {
+    if (demoCreating) return;
+    setDemoError("");
+    setDemoOk(null);
+    const tpl = String(demoTemplateId || "").trim();
+    const slug = String(demoSlug || "").trim().toLowerCase().replace(/\s+/g, "-");
+    const name = String(demoDisplayName || "").trim();
+    const days = parseInt(String(demoExpiresDays || "").trim(), 10);
+    const adminU = String(demoAdminUser || "").trim().toLowerCase();
+    const adminP = String(demoAdminPass || "");
+    const masterP = String(demoMaestroPass || "");
+
+    if (!tpl) {
+      setDemoError("Elegí el restaurante plantilla en la lista.");
+      return;
+    }
+    if (!slug || slug.length < 2) {
+      setDemoError("Slug del demo: mínimo 2 caracteres (minúsculas, guiones).");
+      return;
+    }
+    if (!name) {
+      setDemoError("Falta el nombre del demo.");
+      return;
+    }
+    if (!Number.isFinite(days) || days < 1 || days > 366) {
+      setDemoError("Días de validez: entre 1 y 366.");
+      return;
+    }
+    if (adminU.length < 2) {
+      setDemoError("Usuario admin demasiado corto.");
+      return;
+    }
+    if (adminP.length < 6) {
+      setDemoError("Contraseña admin: mínimo 6 caracteres.");
+      return;
+    }
+    if (!masterP) {
+      setDemoError("Falta la contraseña maestro.");
+      return;
+    }
+    const waDigits = String(demoWhatsapp || "")
+      .replace(/\D/g, "")
+      .trim();
+    if (demoWhatsapp.trim() && waDigits.length > 0 && waDigits.length < 8) {
+      setDemoError("WhatsApp del demo: al menos 8 dígitos, o dejá el campo vacío para uno automático.");
+      return;
+    }
+
+    const urls = buildRestobotHttpApiCandidates(MAESTRO_CREATE_DEMO_PATH);
+    if (!urls.length) {
+      setDemoError(
+        "No hay URL de backend permitida desde este navegador. Configurá VITE_MESA_API_BASE_URL (HTTPS) o probá en local."
+      );
+      return;
+    }
+
+    const body = {
+      maestroPassword: masterP,
+      templateRestaurantId: tpl,
+      demoSlug: slug,
+      demoName: name,
+      expiresDays: days,
+      adminUsername: adminU,
+      adminPassword: adminP,
+      ...(waDigits.length >= 8 ? { demoWhatsappNumber: waDigits } : {})
+    };
+
+    setDemoCreating(true);
+    let lastErr = "No se pudo contactar el servidor (¿corre index.js y el proxy?).";
+    try {
+      for (const url of urls) {
+        let res;
+        try {
+          res = await fetchWithTimeout(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+          });
+        } catch (e) {
+          lastErr = e?.name === "AbortError" ? "Tiempo de espera agotado al contactar el backend." : e?.message || lastErr;
+          continue;
+        }
+        const text = await res.text();
+        let json;
+        try {
+          json = text ? JSON.parse(text) : {};
+        } catch {
+          const snippet = String(text || "").trim().slice(0, 240);
+          json = { error: snippet || res.statusText || "Respuesta no JSON del servidor" };
+        }
+        if (!res.ok) {
+          lastErr = json.error || res.statusText || lastErr;
+          if (res.status === 403 || res.status === 503 || res.status === 400 || res.status === 409) {
+            setDemoError(lastErr);
+            return;
+          }
+          continue;
+        }
+        const base = String(effectiveDashboardBase || window.location.origin || "").replace(/\/$/, "");
+        const loginUrl = `${base}/d/${json.demoSlug}/login`;
+        setDemoOk({ ...json, loginUrl });
+        setDemoAdminPass("");
+        setDemoMaestroPass("");
+        return;
+      }
+      const hint404 =
+        /not found/i.test(String(lastErr || ""))
+          ? " · 404: ese host/puerto no es el index.js con las rutas /api/maestro/create-demo (proceso viejo u otro servicio). Unificá VITE_BACKEND_PORT con el puerto donde publicás el bot (ej. 3001), reiniciá Vite (proxy /api) y quitá o corregí VITE_MESA_API_BASE_URL si apunta al lugar equivocado."
+          : "";
+      setDemoError(`${lastErr}${hint404}`);
+    } finally {
+      setDemoCreating(false);
+    }
+  }
+
+  const busy =
+    savingDelivery ||
+    savingTables ||
+    savingDashboardBase ||
+    demoCreating ||
+    !restaurantId ||
+    loadingRestaurant;
 
   return (
     <section className="space-y-4">
@@ -291,6 +528,237 @@ export default function MaestroPanel({
             <strong>Métodos de pago:</strong> activá/desactivá efectivo y Mercado Pago en el flujo del bot.
           </li>
         </ul>
+      </div>
+
+      <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/25 p-6 space-y-4">
+        <h3 className="text-sm font-semibold text-cyan-100">Nuevo demo (clonar desde plantilla)</h3>
+        <p className="text-xs text-cyan-100/85 leading-relaxed">
+          Crea un restaurante con <code className="text-[11px]">demo_slug</code>, copia el menú desde el restaurante
+          plantilla que elijas en la lista y da de alta un usuario admin. Podés indicar un{" "}
+          <strong className="text-cyan-100">WhatsApp propio</strong> para el demo (único en la base); si lo dejás vacío,
+          el servidor asigna un número interno que no choca con la plantilla. El pedido lo procesa el backend Node (
+          <code className="text-[11px]">index.js</code>) con clave de servicio; en el{" "}
+          <code className="text-[11px]">.env</code> del servidor tenés que tener{" "}
+          <code className="text-[11px]">MAESTRO_PASSWORD</code> o{" "}
+          <code className="text-[11px]">VITE_MAESTRO_PASSWORD</code> (misma contraseña que usás para entrar como Maestro
+          en este panel).
+        </p>
+        <p className="text-xs text-cyan-200/70">
+          En Vercel, el POST se reenvía con <code className="text-[11px]">MESA_API_PROXY_ORIGIN</code> igual que los pedidos
+          QR y el recetario IA.
+        </p>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1 text-sm sm:col-span-2">
+            <span className="block text-cyan-200/90">Restaurante plantilla (se copia el menú)</span>
+            {templateListLoading ? (
+              <p className="text-xs text-cyan-200/70">Cargando restaurantes…</p>
+            ) : null}
+            {templateListError ? (
+              <p className="text-xs text-rose-300" role="alert">
+                No se pudo cargar la lista: {templateListError}
+              </p>
+            ) : null}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:gap-4">
+              <div className="relative min-w-0 max-w-xl flex-1">
+                <select
+                  value={demoTemplateId}
+                  onChange={(e) => setDemoTemplateId(e.target.value)}
+                  disabled={demoCreating || templateListLoading || templateOptions.length === 0}
+                  aria-label="Elegir restaurante plantilla para clonar el menú"
+                  className="h-10 w-full cursor-pointer appearance-none rounded-lg border border-cyan-800/60 bg-slate-950 pl-3 pr-10 text-sm text-slate-100 shadow-sm transition-colors hover:border-cyan-600/50 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <option value="">Elegí un restaurante plantilla…</option>
+                  {templateOptions.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <span
+                  className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-cyan-400/70"
+                  aria-hidden
+                >
+                  <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                    <path
+                      fillRule="evenodd"
+                      d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </span>
+              </div>
+              {demoTemplateId && selectedTemplateOption ? (
+                templateDemoLoginUrl ? (
+                  <div className="flex shrink-0 flex-col gap-1 sm:pb-0.5">
+                    <a
+                      href={templateDemoLoginUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sm font-semibold text-cyan-300 underline decoration-cyan-500/50 underline-offset-2 hover:text-cyan-200"
+                    >
+                      Login del demo
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => void copyText(templateDemoLoginUrl, "URL de login copiada.")}
+                      className="text-left text-[11px] font-medium text-cyan-400/90 hover:text-cyan-300"
+                    >
+                      Copiar enlace
+                    </button>
+                  </div>
+                ) : (
+                  <p className="max-w-xs text-[11px] leading-snug text-cyan-200/65 sm:pb-1">
+                    Este local no tiene <code className="text-[10px]">demo_slug</code>: no hay URL{" "}
+                    <code className="text-[10px]">/d/…/login</code> hasta asignárselo (SQL o nuevo demo).
+                  </p>
+                )
+              ) : null}
+            </div>
+            {demoTemplateId ? (
+              <p className="font-mono text-[11px] text-cyan-200/50">
+                id: {demoTemplateId}
+                {selectedTemplateOption?.demoSlug ? (
+                  <>
+                    {" "}
+                    · slug: <span className="text-cyan-200/70">{selectedTemplateOption.demoSlug}</span>
+                  </>
+                ) : null}
+              </p>
+            ) : null}
+          </div>
+          <label className="block space-y-1 text-sm">
+            <span className="text-cyan-200/90">Slug URL (/d/…/login)</span>
+            <input
+              type="text"
+              value={demoSlug}
+              onChange={(e) => setDemoSlug(e.target.value)}
+              placeholder="ej: cliente-acme"
+              disabled={demoCreating}
+              className="h-10 w-full rounded-lg border border-cyan-800/60 bg-slate-950 px-3 text-sm text-slate-100 disabled:opacity-50"
+              autoComplete="off"
+            />
+          </label>
+          <label className="block space-y-1 text-sm">
+            <span className="text-cyan-200/90">Nombre del restaurante demo</span>
+            <input
+              type="text"
+              value={demoDisplayName}
+              onChange={(e) => setDemoDisplayName(e.target.value)}
+              placeholder="Ej: Demo Cliente ACME"
+              disabled={demoCreating}
+              className="h-10 w-full rounded-lg border border-cyan-800/60 bg-slate-950 px-3 text-sm text-slate-100 disabled:opacity-50"
+              autoComplete="off"
+            />
+          </label>
+          <label className="block space-y-1 text-sm sm:col-span-2">
+            <span className="text-cyan-200/90">WhatsApp del restaurante demo (opcional)</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={demoWhatsapp}
+              onChange={(e) => setDemoWhatsapp(e.target.value)}
+              placeholder="Ej: 56912345678 — vacío = número automático interno"
+              disabled={demoCreating}
+              className="h-10 w-full max-w-md rounded-lg border border-cyan-800/60 bg-slate-950 px-3 text-sm text-slate-100 disabled:opacity-50"
+              autoComplete="off"
+            />
+            <span className="block text-[11px] text-cyan-200/60">
+              Debe ser único (no puede repetir plantilla ni otro local). Solo dígitos; con prefijo país.
+            </span>
+          </label>
+          <label className="block space-y-1 text-sm">
+            <span className="text-cyan-200/90">Días hasta expiración</span>
+            <input
+              type="number"
+              min={1}
+              max={366}
+              value={demoExpiresDays}
+              onChange={(e) => setDemoExpiresDays(e.target.value)}
+              disabled={demoCreating}
+              className="h-10 w-full rounded-lg border border-cyan-800/60 bg-slate-950 px-3 text-sm text-slate-100 disabled:opacity-50"
+            />
+            <span className="block text-[11px] text-cyan-200/60 leading-snug">
+              Valor por defecto del equipo: variable opcional{" "}
+              <code className="text-[10px]">VITE_DEFAULT_DEMO_EXPIRES_DAYS</code> (1–366). Al vencer,{" "}
+              <code className="text-[10px]">demo_expires_at</code> bloquea el login; borrar datos o filas es Fase 4 del
+              roadmap — ver <code className="text-[10px]">dashboard/sql/demo_cleanup_expired.sql</code>.
+            </span>
+          </label>
+          <label className="block space-y-1 text-sm">
+            <span className="text-cyan-200/90">Usuario admin del demo</span>
+            <input
+              type="text"
+              value={demoAdminUser}
+              onChange={(e) => setDemoAdminUser(e.target.value)}
+              placeholder="admin_demo"
+              disabled={demoCreating}
+              className="h-10 w-full rounded-lg border border-cyan-800/60 bg-slate-950 px-3 text-sm text-slate-100 disabled:opacity-50"
+              autoComplete="off"
+            />
+          </label>
+          <label className="block space-y-1 text-sm">
+            <span className="text-cyan-200/90">Contraseña admin (nueva)</span>
+            <input
+              type="password"
+              value={demoAdminPass}
+              onChange={(e) => setDemoAdminPass(e.target.value)}
+              disabled={demoCreating}
+              className="h-10 w-full rounded-lg border border-cyan-800/60 bg-slate-950 px-3 text-sm text-slate-100 disabled:opacity-50"
+              autoComplete="new-password"
+            />
+          </label>
+          <label className="block space-y-1 text-sm sm:col-span-2">
+            <span className="text-cyan-200/90">Contraseña maestro (para autorizar en el servidor)</span>
+            <input
+              type="password"
+              value={demoMaestroPass}
+              onChange={(e) => setDemoMaestroPass(e.target.value)}
+              disabled={demoCreating}
+              className="h-10 w-full max-w-md rounded-lg border border-cyan-800/60 bg-slate-950 px-3 text-sm text-slate-100 disabled:opacity-50"
+              autoComplete="off"
+            />
+          </label>
+        </div>
+
+        {demoError ? (
+          <p className="text-sm text-rose-300" role="alert">
+            {demoError}
+          </p>
+        ) : null}
+        {demoOk ? (
+          <div className="rounded-lg border border-emerald-500/40 bg-emerald-950/30 p-3 text-sm text-emerald-100 space-y-2">
+            <p>Demo listo: slug {demoOk.demoSlug}</p>
+            <p className="text-xs break-all">
+              Login: <span className="font-mono text-emerald-200">{demoOk.loginUrl}</span>
+            </p>
+            <p className="text-xs text-emerald-200/80">
+              Platos copiados: {demoOk.menuItemCount ?? "—"} · expira: {demoOk.demoExpiresAt || "—"}
+              {demoOk.demoWhatsappNumber ? (
+                <>
+                  {" "}
+                  · WhatsApp: <span className="font-mono text-emerald-200/90">{demoOk.demoWhatsappNumber}</span>
+                </>
+              ) : null}
+            </p>
+            <button
+              type="button"
+              onClick={() => void copyText(demoOk.loginUrl, "URL copiada.")}
+              className="rounded border border-emerald-400/40 bg-emerald-600/30 px-2 py-1 text-xs font-semibold text-emerald-50 hover:bg-emerald-600/45"
+            >
+              Copiar URL de login
+            </button>
+          </div>
+        ) : null}
+
+        <button
+          type="button"
+          disabled={demoCreating}
+          onClick={() => void submitCreateDemo()}
+          className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-500 disabled:opacity-50"
+        >
+          {demoCreating ? "Creando demo…" : "Crear demo"}
+        </button>
       </div>
 
       <div className="rounded-xl border border-slate-700 bg-slate-900 p-6 space-y-5">

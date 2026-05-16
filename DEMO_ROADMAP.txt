@@ -1,0 +1,131 @@
+================================================================================
+RESTOBOT — ROADMAP DEMOS
+================================================================================
+Marcá [x] en TU entorno cuando apliques pasos manuales (Supabase, deploy, etc.).
+
+--------------------------------------------------------------------------------
+GLOSARIO — qué significan 6.2, 5.2 y 5.4 (sin repetir 1.x ni 3.3–3.4)
+--------------------------------------------------------------------------------
+6.2  Variables por entorno (deploy)
+     Cuando subís el dashboard a Vercel, Netlify, Cloudflare Pages, etc., suelen existir
+     dos “mundos”: Preview (rama / PR) y Production (rama main). 6.2 es configurar ALLÍ
+     las mismas claves VITE_* / URLs pero con valores distintos: p. ej. Production apunta
+     a tu Supabase de demo público y Preview a otro proyecto o a datos de prueba; así un
+     deploy de prueba no pisa claves ni URL del sitio que ven los clientes.
+
+5.2  Mercado Pago en demos
+     En demos conviene NO cobrar dinero real por error: usar credenciales de TEST de MP,
+     o desactivar MP en filas demo (`mercadopago_enabled` / metadata), o no exponer el
+     token de producción en el entorno del dashboard demo. Es decisión de negocio + .env.
+
+5.4  Anti-abuso API mesa
+     POST /api/mesa/order (index.js) hoy confía en MESA_QR_SECRET + validaciones de menú.
+     “Anti-abuso” sería añadir límites (p. ej. por IP, por restaurant_id, rate limit) para
+     que nadie spamee pedidos o abuse del endpoint si el QR se filtra. Opcional hasta que
+     tengas tráfico público molesto.
+
+--------------------------------------------------------------------------------
+REGISTRO DE AVANCE EN EL REPO (qué se hizo en código / archivos)
+--------------------------------------------------------------------------------
+Última actualización (sesión reciente):
+  · Quitado `VITE_DEFAULT_DEMO_SLUG=cliente-prueba` del `.env` de ejemplo: la raíz `/` ahora usa `/start` salvo que
+    vuelvas a definir un slug. En Vercel borrá esa variable si la tenías y redeployá el dashboard.
+  · Fase 4.1–4.2 (documentación): `dashboard/sql/demo_cleanup_expired_runbook.sql` — inventario de vencidos,
+    estrategias A/B, DELETE comentados, ejemplo `pg_cron` y alternativas (GitHub Actions / worker Node).
+  · Fase 5.1 (UI): aviso «datos de prueba / sin SLA» en `Login.jsx` (rutas `/d/…/login` o si
+    `VITE_DEMO_LEGAL_BANNER=1`) y en `DemoHome.jsx`. Comentario opcional en `.env`.
+  · Fase 6.1 (parcial): el dashboard ya tiene `npm run build` + `dashboard/vercel.json` (rewrites SPA);
+    falta que VOS publiques a Vercel/Netlify/static según tu hosting.
+  · Fase 7.1: workflow GitHub Actions `.github/workflows/dashboard-build.yml` (build del dashboard en push/PR).
+  · Fase 5.3: ítem «política WhatsApp por cliente» marcado no aplica en este roadmap (alcance = panel/carta/maestro;
+    el código del bot WPP sigue en el repo sin tocar — no rompe despliegues que sí lo usen).
+
+--------------------------------------------------------------------------------
+CÓDIGO EN EL REPO — SOLO LO QUE AÚN FALTA (resumen)
+--------------------------------------------------------------------------------
+[ ] Fase 5.2 y 5.4 — Ver GLOSARIO arriba (MP en demos; anti-abuso API mesa) — opcional / decisión de equipo.
+[ ] Fase 6.2 — Ver GLOSARIO arriba (variables preview vs production en el hosting).
+[ ] Fase 1.x — Solo si un proyecto Supabase NUEVO aún no tuvo migración / primer demo (ver tabla abajo).
+
+(Ya en el repo: multi-tenant /d/…, Maestro, db-login, SQL de ejemplo, CI build dashboard, runbook aquí abajo,
+aviso legal mínimo en login demo, runbook SQL de limpieza.)
+
+--------------------------------------------------------------------------------
+RUNBOOK INTERNO — alta / baja / extensión de un demo (Fase 7.2)
+--------------------------------------------------------------------------------
+Alta: Panel Maestro → «Nuevo demo» (o `demo_provision_new_demo.sql`). Anotar slug, URL `/d/{slug}/login`,
+      usuario admin y fecha `demo_expires_at`.
+Extensión: en Supabase, `update restaurants set demo_expires_at = … where demo_slug = …` (o Maestro futuro).
+Baja: cuando venza, listar con `demo_cleanup_expired_runbook.sql` PASO 1; aplicar estrategia A o B con DELETEs
+      comentados en el mismo archivo o en `demo_cleanup_expired.sql`. Opcional: cron / Action programada.
+
+--------------------------------------------------------------------------------
+FASE 1 — SUPABASE / PRIMER SETUP (manual; NO es código del repo)
+--------------------------------------------------------------------------------
+¿Ya tenés multi-tenant y un login `/d/…/login` que funciona? → Marcá 1.1–1.5 [x] o ignorá esta tabla.
+
+[ ] 1.1  Ejecutar dashboard/sql/demo_multi_tenant.sql
+[ ] 1.2  Restaurante plantilla con menú (Maestro → plantilla)
+[ ] 1.3  Primer demo: Maestro «Nuevo demo» o demo_provision_new_demo.sql
+[ ] 1.4  Usuario admin del demo (Maestro lo crea si usaste el formulario)
+[ ] 1.5  Probar {dashboard}/d/{demo_slug}/login
+
+--------------------------------------------------------------------------------
+FASE 2 — PROVISIONAMIENTO Y DATOS
+--------------------------------------------------------------------------------
+[x] 2.1  Plantilla para clonar (Maestro).
+[x] 2.2  Convención demo_slug / URL /d/{slug}/…
+[x] 2.3  Días de validez + VITE_DEFAULT_DEMO_EXPIRES_DAYS opcional. `VITE_DEFAULT_DEMO_SLUG` opcional (sin él, `/` → `/start`).
+
+--------------------------------------------------------------------------------
+FASE 3 — SEGURIDAD (demo)
+--------------------------------------------------------------------------------
+[x] 3.1a  Login BD vía POST /api/dashboard/db-login + `rls_phase3_security_notes.sql`.
+[-] 3.1b / 3.2  RLS duro + Supabase Auth — omitidos (solo demo).
+[ ] 3.3  Supabase dedicado a demos (operativo).
+[ ] 3.4  Rotar claves si se filtraron (operativo).
+
+--------------------------------------------------------------------------------
+FASE 4 — LIMPIEZA (TTL)
+--------------------------------------------------------------------------------
+[x] 4.1  Estrategias documentadas (runbook SQL).
+[x] 4.2  Plantilla de automatización (ejemplo pg_cron + alternativas en runbook). La ejecución real es en tu infra.
+[-] 4.3  Aviso previo al borrado — no aplica.
+
+--------------------------------------------------------------------------------
+FASE 5 — PRODUCTO DEMO (alcance: panel, carta, maestro, API mesa/QR; no roadmap de bot WhatsApp)
+--------------------------------------------------------------------------------
+[x] 5.1  Aviso «datos de prueba / sin SLA» en UI (Login + DemoHome; opción VITE_DEMO_LEGAL_BANNER para /login).
+[ ] 5.2  Mercado Pago en demos (ver GLOSARIO).
+[-] 5.3  Política WhatsApp por cliente — no aplica aquí: este roadmap cubre demos de funciones web/panel; el repo
+          conserva `index.js` + WhatsApp para quien despliegue pedidos reales. No se eliminó código WPP.
+[ ] 5.4  Anti-abuso API mesa (ver GLOSARIO; opcional).
+
+--------------------------------------------------------------------------------
+FASE 6 — DESPLIEGUE
+--------------------------------------------------------------------------------
+[x] 6.1  Build estático: `npm run build` en `dashboard/` + `vercel.json` con rewrites SPA (falta deploy en tu cuenta).
+[ ] 6.2  Variables por entorno — preview vs production (ver GLOSARIO).
+
+--------------------------------------------------------------------------------
+FASE 7 — CALIDAD
+--------------------------------------------------------------------------------
+[x] 7.1  CI: `.github/workflows/dashboard-build.yml`.
+[x] 7.2  Runbook: sección «RUNBOOK INTERNO» arriba en este archivo.
+
+================================================================================
+SIGUIENTE ACCIÓN INMEDIATA (para vos / equipo)
+================================================================================
+1) Redeploy del dashboard (Vercel) con el último código del repo; en Vercel quitá `VITE_DEFAULT_DEMO_SLUG` si existía.
+2) Fase 5.2 y 5.4 según necesidad (GLOSARIO).
+
+Archivos clave:
+  dashboard/sql/demo_multi_tenant.sql
+  dashboard/sql/demo_provision_new_demo.sql
+  dashboard/sql/demo_cleanup_expired.sql
+  dashboard/sql/demo_cleanup_expired_runbook.sql
+  dashboard/sql/rls_policies_restobot.sql
+  dashboard/sql/rls_phase3_security_notes.sql
+  .github/workflows/dashboard-build.yml
+
+================================================================================

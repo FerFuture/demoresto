@@ -34,7 +34,8 @@ import MesaQrLinksPanel from "../components/MesaQrLinksPanel";
 import StockManagerPanel from "../components/StockManagerPanel";
 import QrMenuPanel from "../components/QrMenuPanel";
 import OrdersDateRangeCalendar from "../components/OrdersDateRangeCalendar";
-import { fetchRestaurantForDashboard } from "../lib/restaurantTenant";
+import { resolveRestaurantForDashboard } from "../lib/restaurantTenant";
+import { useDemoTenant } from "../lib/DemoTenantContext";
 import { isValidPublicDashboardBaseUrl, normalizePublicDashboardBaseUrlInput } from "../lib/publicDashboardUrl";
 import { countLowStockItems } from "../lib/stockAlerts";
 import { getSession } from "../lib/auth";
@@ -353,6 +354,7 @@ function localDateKeyEndIso(dateKey) {
 }
 
 export default function AdminApp({ onLogout }) {
+  const { demoSlug } = useDemoTenant();
   const session = getSession();
   const isMaestro = session?.role === "maestro";
   const isEncargado = session?.role === "encargado";
@@ -428,7 +430,9 @@ export default function AdminApp({ onLogout }) {
     opening_days: [...ALL_BUSINESS_HOUR_DAY_VALUES],
     opening_time_from: "",
     opening_time_to: "",
-    policies: ""
+    policies: "",
+    /** demo_slug desde BD (rutas /d/{slug}/); vacío en legado. */
+    demo_slug: ""
   });
   /** false = bot solo retiro; ocultar UI de delivery en admin. Por defecto true si la columna aún no existe. */
   const [deliveryEnabled, setDeliveryEnabled] = useState(true);
@@ -738,7 +742,7 @@ export default function AdminApp({ onLogout }) {
     const { data, error: queryError } = await supabase
       .from("restaurants")
       .select(
-        "name, public_name, address, delivery_zones, delivery_enabled, local_enabled, mesa_enabled, cash_enabled, mercadopago_enabled, stats_enabled, table_count, opening_hours, policies, metadata"
+        "name, public_name, address, delivery_zones, delivery_enabled, local_enabled, mesa_enabled, cash_enabled, mercadopago_enabled, stats_enabled, table_count, opening_hours, policies, metadata, demo_slug"
       )
       .eq("id", rid)
       .maybeSingle();
@@ -778,7 +782,8 @@ export default function AdminApp({ onLogout }) {
       opening_days: businessHoursState.openDays,
       opening_time_from: businessHoursState.openTime,
       opening_time_to: businessHoursState.closeTime,
-      policies: policiesAsText
+      policies: policiesAsText,
+      demo_slug: data.demo_slug != null && data.demo_slug !== undefined ? String(data.demo_slug) : ""
     });
 
     setDeliveryEnabled(data.delivery_enabled !== false);
@@ -1708,7 +1713,7 @@ export default function AdminApp({ onLogout }) {
 
   useEffect(() => {
     async function loadRestaurant() {
-      const { data, error: restaurantError } = await fetchRestaurantForDashboard(supabase);
+      const { data, error: restaurantError } = await resolveRestaurantForDashboard(supabase, { demoSlug });
       if (restaurantError) {
         setError(`Error resolviendo restaurante: ${restaurantError.message}`);
         return;
@@ -1723,7 +1728,7 @@ export default function AdminApp({ onLogout }) {
     }
 
     loadRestaurant();
-  }, []);
+  }, [demoSlug]);
 
   useEffect(() => {
     if (!restaurantId) return;
@@ -3051,6 +3056,7 @@ export default function AdminApp({ onLogout }) {
             restaurantId={restaurantId}
             restaurantMetadata={restaurantMetadata}
             restaurantName={restaurantConfig.public_name || restaurantConfig.name || restaurantName}
+            fallbackDemoSlug={String(restaurantConfig.demo_slug || demoSlug || "").trim()}
           />
         ) : activeTab === "mesaqr" ? (
           <section className="space-y-4">
@@ -3065,6 +3071,7 @@ export default function AdminApp({ onLogout }) {
               qrModuleEnabled={mesaQrEnabled}
               restaurantMetadata={restaurantMetadata}
               onRestaurantMetadataChange={setRestaurantMetadata}
+              fallbackDemoSlug={String(restaurantConfig.demo_slug || demoSlug || "").trim()}
               tableCount={Math.min(
                 500,
                 Math.max(1, parseInt(String(restaurantConfig.table_count || "12").trim(), 10) || 12)
@@ -3076,7 +3083,10 @@ export default function AdminApp({ onLogout }) {
         ) : activeTab === "stats" && statsEnabled ? (
           <AdminStats restaurantId={restaurantId} />
         ) : activeTab === "users" ? (
-          <DashboardUsersPanel />
+          <DashboardUsersPanel
+            restaurantId={restaurantId}
+            scopeByRestaurant={Boolean(demoSlug)}
+          />
         ) : activeTab === "maestro" && isMaestro ? (
           <MaestroPanel
             restaurantId={restaurantId}

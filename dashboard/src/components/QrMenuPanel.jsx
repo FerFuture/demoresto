@@ -3,6 +3,7 @@ import { supabase } from "../supabaseClient";
 import { currency } from "../lib/format";
 import { resolvePublicDashboardBaseUrl } from "../lib/publicDashboardUrl";
 import { buildQrDataUrl, downloadDataUrlAsPng, downloadQrPdf } from "../lib/qrCode";
+import { useDemoTenant } from "../lib/DemoTenantContext";
 
 function normalizeCategory(value) {
   const text = String(value ?? "")
@@ -16,7 +17,17 @@ function normalizeCategory(value) {
 /**
  * Panel admin: vista previa del menú, enlace público /menu y QR descargable.
  */
-export default function QrMenuPanel({ restaurantId, restaurantMetadata, restaurantName }) {
+export default function QrMenuPanel({
+  restaurantId,
+  restaurantMetadata,
+  restaurantName,
+  fallbackDemoSlug = ""
+}) {
+  const { demoSlug: slugFromRoute } = useDemoTenant();
+  const pathSlug = String(slugFromRoute || fallbackDemoSlug || "")
+    .trim()
+    .toLowerCase();
+  const menuPath = pathSlug ? `/d/${pathSlug}/menu` : "/menu";
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -33,8 +44,8 @@ export default function QrMenuPanel({ restaurantId, restaurantMetadata, restaura
   const menuPublicUrl = useMemo(() => {
     const base = String(baseUrl || "").replace(/\/$/, "");
     if (!base) return "";
-    return `${base}/menu`;
-  }, [baseUrl]);
+    return `${base}${menuPath}`;
+  }, [baseUrl, menuPath]);
 
   useEffect(() => {
     if (!restaurantId) {
@@ -159,7 +170,7 @@ export default function QrMenuPanel({ restaurantId, restaurantMetadata, restaura
           <h3 className="text-sm font-semibold text-violet-100">Enlace y código QR</h3>
           <p className="mt-1 text-xs text-slate-500 leading-relaxed">
             Ruta pública:{" "}
-            <code className="rounded bg-slate-950 px-1 text-[11px] text-violet-200">/menu</code>
+            <code className="rounded bg-slate-950 px-1 text-[11px] text-violet-200">{menuPath}</code>
             {baseUrl ? null : (
               <>
                 {" "}

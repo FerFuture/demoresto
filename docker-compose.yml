@@ -1,4 +1,6 @@
 services:
+  # Código del bot está en la imagen (no hay bind mount de ./). Tras cambiar index.js/database.js:
+  # docker compose build restobot && docker compose up -d restobot
   restobot:
     build: .
     container_name: restobot-whatsapp
@@ -15,6 +17,12 @@ services:
     build: ./dashboard
     container_name: restobot-dashboard
     restart: always
+    depends_on:
+      - restobot
+    environment:
+      # El browser llama :5173/api/…; Vite debe reenviar al contenedor del bot (puerto interno 3000).
+      # No uses 127.0.0.1:3001 aquí: dentro del contenedor dashboard eso no es el bot y el proxy falla (500).
+      VITE_DEV_API_PROXY_TARGET: http://restobot:3000
     ports:
       - "5173:5173"
     volumes:

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../supabaseClient";
-import { fetchRestaurantForDashboard } from "../lib/restaurantTenant";
+import { resolveRestaurantForDashboard } from "../lib/restaurantTenant";
+import { useDemoTenant } from "../lib/DemoTenantContext";
 import { currency } from "../lib/format";
 
 function groupMenuByCategory(menuItems) {
@@ -29,6 +30,7 @@ function groupMenuByCategory(menuItems) {
  * Menú público solo lectura (ruta /menu). Sin carrito ni pedidos.
  */
 export default function PublicMenuApp() {
+  const { demoSlug } = useDemoTenant();
   const [restaurantName, setRestaurantName] = useState("");
   const [menuEnabled, setMenuEnabled] = useState(true);
   const [menuItems, setMenuItems] = useState([]);
@@ -42,7 +44,7 @@ export default function PublicMenuApp() {
       setLoading(true);
       setError("");
       try {
-        const { data, error: queryError } = await fetchRestaurantForDashboard(supabase);
+        const { data, error: queryError } = await resolveRestaurantForDashboard(supabase, { demoSlug });
         if (cancelled) return;
         if (queryError) throw queryError;
         if (!data) {
@@ -74,7 +76,7 @@ export default function PublicMenuApp() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [demoSlug]);
 
   const menuItemsFiltered = useMemo(() => {
     const raw = String(menuSearchQuery || "").trim().toLowerCase();

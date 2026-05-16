@@ -1,4 +1,6 @@
+const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
+const bcrypt = require("bcryptjs");
 const ws = require("ws");
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -28,6 +30,110 @@ const TABLES = {
   interactions: process.env.SUPABASE_INTERACTIONS_TABLE || "bot_interactions",
   orders: process.env.SUPABASE_ORDERS_TABLE || "orders"
 };
+
+const DASHBOARD_USERS_TABLE = process.env.SUPABASE_DASHBOARD_USERS_TABLE || "dashboard_users";
+
+const DASHBOARD_LOGIN_DB_ROLES = ["admin", "encargado", "delivery", "kitchen", "waiter"];
+
+function deliveryMayLoginTodayDb(weekdays) {
+  if (weekdays == null) return true;
+  if (!Array.isArray(weekdays) || weekdays.length === 0) return false;
+  return weekdays.includes(new Date().getDay());
+}
+
+const DAY_NAMES_ES = [
+  "domingo",
+  "lunes",
+  "martes",
+  "miércoles",
+  "jueves",
+  "viernes",
+  "sábado"
+];
+
+function formatAllowedWeekdaysSentenceDb(weekdays) {
+  if (weekdays == null) return "todos los días";
+  if (!Array.isArray(weekdays) || weekdays.length === 0) {
+    return "ninguno (cuenta sin días habilitados)";
+  }
+  const sorted = [...new Set(weekdays)].sort((a, b) => a - b);
+  return sorted.map((d) => DAY_NAMES_ES[d] ?? `día ${d}`).join(", ");
+}
+
+/**
+ * Login de dashboard_users vía service role (solo llamar desde index.js).
+ * No devuelve password_hash al cliente.
+ */
+async function verifyDashboardUserCredentials({ username, password, restaurantId }) {
+  const norm = String(username || "")
+    .trim()
+    .toLowerCase();
+  if (!norm) {
+    return { ok: false, error: "Ingresá un usuario o usá la contraseña del rol sin completar usuario." };
+  }
+  const rid = restaurantId ? String(restaurantId).trim() : "";
+  let q = supabase
+    .from(DASHBOARD_USERS_TABLE)
+    .select("id, password_hash, role, is_active, delivery_work_weekdays, updated_at, restaurant_id")
+    .eq("username", norm);
+  if (rid) {
+    q = q.eq("restaurant_id", rid);
+  }
+  const { data, error } = await q.maybeSingle();
+
+  if (error) {
+    if (error.code === "42P01" || (error.message || "").includes("does not exist")) {
+      return {
+        ok: false,
+        error: "Acceso de usuarios no disponible. Contactá al administrador.",
+        code: error.code
+      };
+    }
+    if (error.code === "42703" || (error.message || "").includes("restaurant_id")) {
+      return {
+        ok: false,
+        error:
+          "La base no tiene restaurant_id en dashboard_users. Ejecutá dashboard/sql/demo_multi_tenant.sql en Supabase.",
+        code: error.code
+      };
+    }
+    return { ok: false, error: `Error de acceso: ${error.message}`, code: error.code };
+  }
+  if (!data || !data.is_active) {
+    return { ok: false, error: "Usuario o contraseña incorrectos." };
+  }
+  if (!DASHBOARD_LOGIN_DB_ROLES.includes(data.role)) {
+    return { ok: false, error: "Rol inválido en la base de datos." };
+  }
+  if (rid && data.restaurant_id && data.restaurant_id !== rid) {
+    return { ok: false, error: "Usuario o contraseña incorrectos." };
+  }
+  let bcryptOk = false;
+  try {
+    bcryptOk = bcrypt.compareSync(String(password || ""), String(data.password_hash || ""));
+  } catch {
+    bcryptOk = false;
+  }
+  if (!bcryptOk) {
+    return { ok: false, error: "Usuario o contraseña incorrectos." };
+  }
+  if (data.role === "delivery" && !deliveryMayLoginTodayDb(data.delivery_work_weekdays)) {
+    const hint = formatAllowedWeekdaysSentenceDb(data.delivery_work_weekdays);
+    return {
+      ok: false,
+      error: `Hoy no podés entrar con esta cuenta de reparto. Días habilitados: ${hint}.`
+    };
+  }
+  return {
+    ok: true,
+    user: {
+      id: data.id,
+      role: data.role,
+      updated_at: data.updated_at,
+      restaurant_id: data.restaurant_id
+    }
+  };
+}
 
 function sanitizeWhatsAppId(raw) {
   return (raw || "").toString().replace(/[^0-9]/g, "");
@@ -307,9 +413,273 @@ async function getRestaurantNameById(restaurantId) {
   return String(data.name || "").trim() || "Restaurante";
 }
 
+function normalizeDemoSlug(raw) {
+  const s = String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/_+/g, "-");
+  return s.replace(/-+/g, "-").replace(/^-|-$/g, "");
+}
+
+/** Evita INSERT inválido si la plantilla tiene metadata null/array o tipos raros. */
+function coerceMetadataForRestaurantInsert(value) {
+  if (value == null || value === "") return {};
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const p = JSON.parse(value);
+      if (typeof p === "object" && p !== null && !Array.isArray(p)) return p;
+    } catch {
+      /* no es JSON */
+    }
+    return {};
+  }
+  return {};
+}
+
 /**
- * Pedido delivery + efectivo esperando que el cliente confirme el total (ticket ya enviado).
+ * Número solo para fila `is_demo`: nunca reutilizar el WA de la plantilla (UNIQUE en whatsapp_number).
  */
+function uniquePlaceholderWhatsAppForDemo() {
+  const tail = Array.from(crypto.randomBytes(10), (b) => String(b % 10)).join("");
+  return `5699${String(Date.now()).slice(-8)}${tail}`;
+}
+
+const DEMO_WHATSAPP_MAX_DIGITS = 20;
+
+/** Solo dígitos; vacío = null (usar placeholder). */
+function normalizeOptionalDemoWhatsApp(raw) {
+  const d = String(raw ?? "")
+    .replace(/\D/g, "")
+    .trim();
+  if (!d) return null;
+  if (d.length < 8) {
+    throw new Error("WhatsApp del demo: al menos 8 dígitos, o dejá el campo vacío para generar uno automático.");
+  }
+  if (d.length > DEMO_WHATSAPP_MAX_DIGITS) {
+    throw new Error(`WhatsApp del demo: como máximo ${DEMO_WHATSAPP_MAX_DIGITS} dígitos.`);
+  }
+  return d;
+}
+
+function flagOrDefault(v, defaultTrue = true) {
+  if (v === null || v === undefined) return defaultTrue;
+  return Boolean(v);
+}
+
+function formatSupabaseErrHint(err) {
+  const m = String(err?.message || "");
+  const c = String(err?.code || "");
+  const combined = `${m} ${c}`;
+  if (/permission denied|42501|row-level security|RLS/i.test(combined)) {
+    return " Configurá SUPABASE_SERVICE_ROLE_KEY en el .env del proceso Node (index.js); la clave anon no alcanza para INSERT en restaurants.";
+  }
+  if (/column|42703|does not exist/i.test(combined)) {
+    return " Revisá migraciones: dashboard/sql/demo_multi_tenant.sql y columnas de restaurants.";
+  }
+  return "";
+}
+
+/**
+ * Clona un restaurante plantilla + filas de menú y (opcional) un usuario admin del dashboard.
+ * Usa service role (solo desde proceso Node).
+ */
+async function createDemoFromTemplate({
+  templateRestaurantId,
+  demoSlug: demoSlugRaw,
+  demoName: demoNameRaw,
+  expiresDays: expiresDaysRaw,
+  adminUsername: adminUsernameRaw,
+  adminPassword: adminPasswordRaw,
+  demoWhatsappNumber: demoWhatsappNumberRaw
+}) {
+  const tpl = String(templateRestaurantId || "").trim();
+  const slug = normalizeDemoSlug(demoSlugRaw);
+  const demoName = String(demoNameRaw || "").trim();
+  const days = Number(expiresDaysRaw);
+  const adminUsername = String(adminUsernameRaw || "").trim().toLowerCase();
+  const adminPassword = String(adminPasswordRaw || "");
+
+  if (!tpl) {
+    throw new Error("Falta templateRestaurantId (UUID del restaurante plantilla).");
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tpl)) {
+    throw new Error("templateRestaurantId no es un UUID válido.");
+  }
+  if (!slug || slug.length < 2) {
+    throw new Error("demo_slug demasiado corto (mínimo 2 caracteres).");
+  }
+  if (slug.length > 64) {
+    throw new Error("demo_slug demasiado largo (máximo 64).");
+  }
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
+    throw new Error("demo_slug inválido: usá minúsculas, números y guiones (sin espacios).");
+  }
+  if (!demoName) {
+    throw new Error("Falta el nombre del demo.");
+  }
+  if (!Number.isFinite(days) || days < 1 || days > 366) {
+    throw new Error("expiresDays debe ser un número entre 1 y 366.");
+  }
+  if (adminUsername.length < 2) {
+    throw new Error("Usuario admin demasiado corto.");
+  }
+  if (adminPassword.length < 6) {
+    throw new Error("Contraseña admin: mínimo 6 caracteres.");
+  }
+
+  const { data: dup, error: dupErr } = await supabase
+    .from(TABLES.restaurants)
+    .select("id")
+    .eq("demo_slug", slug)
+    .maybeSingle();
+  if (dupErr) {
+    throw new Error(`No se pudo verificar demo_slug: ${dupErr.message}`);
+  }
+  if (dup) {
+    throw new Error("Ese demo_slug ya existe.");
+  }
+
+  const { data: template, error: tErr } = await supabase
+    .from(TABLES.restaurants)
+    .select(
+      "whatsapp_number, opening_hours, policies, address, delivery_zones, delivery_enabled, local_enabled, mesa_enabled, cash_enabled, mercadopago_enabled, stats_enabled, table_count, metadata"
+    )
+    .eq("id", tpl)
+    .maybeSingle();
+  if (tErr) {
+    throw new Error(`Error leyendo plantilla: ${tErr.message}`);
+  }
+  if (!template) {
+    throw new Error("Plantilla no encontrada.");
+  }
+
+  const requestedWa = normalizeOptionalDemoWhatsApp(demoWhatsappNumberRaw);
+  let whatsappForInsert;
+  if (requestedWa) {
+    const { data: waDup, error: waDupErr } = await supabase
+      .from(TABLES.restaurants)
+      .select("id")
+      .eq("whatsapp_number", requestedWa)
+      .maybeSingle();
+    if (waDupErr) {
+      throw new Error(`No se pudo verificar WhatsApp: ${waDupErr.message}`);
+    }
+    if (waDup) {
+      throw new Error(
+        "Ese número de WhatsApp ya está en uso por otro restaurante. Probá con otro o dejá el campo vacío para uno automático."
+      );
+    }
+    whatsappForInsert = requestedWa;
+  } else {
+    whatsappForInsert = uniquePlaceholderWhatsAppForDemo();
+  }
+
+  const expiresIso = new Date(Date.now() + Math.floor(days) * 86400000).toISOString();
+  const insertRow = {
+    name: demoName,
+    public_name: demoName,
+    whatsapp_number: whatsappForInsert,
+    opening_hours: template.opening_hours ?? null,
+    policies: template.policies ?? null,
+    address: template.address ?? null,
+    delivery_zones: template.delivery_zones ?? null,
+    delivery_enabled: flagOrDefault(template.delivery_enabled),
+    local_enabled: flagOrDefault(template.local_enabled),
+    mesa_enabled: flagOrDefault(template.mesa_enabled),
+    cash_enabled: flagOrDefault(template.cash_enabled),
+    mercadopago_enabled: flagOrDefault(template.mercadopago_enabled),
+    stats_enabled: flagOrDefault(template.stats_enabled),
+    table_count:
+      Number.isFinite(Number(template.table_count)) && Number(template.table_count) >= 1
+        ? Math.floor(Number(template.table_count))
+        : 12,
+    metadata: coerceMetadataForRestaurantInsert(template.metadata),
+    demo_slug: slug,
+    demo_expires_at: expiresIso,
+    is_demo: true
+  };
+
+  const { data: newRest, error: insErr } = await supabase
+    .from(TABLES.restaurants)
+    .insert(insertRow)
+    .select("id")
+    .single();
+  if (insErr) {
+    const pe = insErr;
+    const human = [pe.message, pe.details, pe.hint].filter(Boolean).join(" — ");
+    throw new Error(
+      `No se pudo crear el restaurante demo: ${human || JSON.stringify(pe)}${formatSupabaseErrHint(pe)}`
+    );
+  }
+  if (!newRest?.id) {
+    throw new Error(
+      "No se pudo crear el restaurante demo: respuesta sin id. Revisá permisos (service role) y RLS."
+    );
+  }
+  const newId = newRest.id;
+
+  async function rollback() {
+    await supabase.from(TABLES.restaurants).delete().eq("id", newId);
+  }
+
+  try {
+    const { data: menuRows, error: mErr } = await supabase
+      .from(TABLES.menuItems)
+      .select("name, description, category, price, available")
+      .eq("restaurant_id", tpl);
+    if (mErr) {
+      throw new Error(`Error copiando menú: ${mErr.message}`);
+    }
+    const rows = menuRows || [];
+    if (rows.length) {
+      const inserts = rows.map((m) => ({
+        restaurant_id: newId,
+        name: m.name,
+        description: m.description,
+        category: m.category,
+        price: m.price,
+        available: m.available
+      }));
+      const { error: miErr } = await supabase.from(TABLES.menuItems).insert(inserts);
+      if (miErr) {
+        throw new Error(`No se pudo insertar menú clonado: ${miErr.message}`);
+      }
+    }
+
+    const passwordHash = bcrypt.hashSync(adminPassword, 10);
+    const nowIso = new Date().toISOString();
+    const { error: duErr } = await supabase.from(DASHBOARD_USERS_TABLE).insert({
+      username: adminUsername,
+      password_hash: passwordHash,
+      role: "admin",
+      restaurant_id: newId,
+      is_active: true,
+      label: "Admin demo",
+      updated_at: nowIso
+    });
+    if (duErr) {
+      throw new Error(`No se pudo crear el usuario admin: ${duErr.message}`);
+    }
+
+    return {
+      restaurantId: newId,
+      demoSlug: slug,
+      demoExpiresAt: expiresIso,
+      menuItemCount: rows.length,
+      demoWhatsappNumber: whatsappForInsert
+    };
+  } catch (e) {
+    try {
+      await rollback();
+    } catch {
+      /* best effort */
+    }
+    throw e;
+  }
+}
+
 async function getOrderAwaitingCustomerTotalConfirm({ restaurantId, customerNumber, botNumber }) {
   const botVariants = botNumberVariantsForQuery(botNumber);
   if (!botVariants.length) return null;
@@ -345,5 +715,7 @@ module.exports = {
   updateOrder,
   updateOrderMatching,
   getRestaurantNameById,
-  getOrderAwaitingCustomerTotalConfirm
+  getOrderAwaitingCustomerTotalConfirm,
+  createDemoFromTemplate,
+  verifyDashboardUserCredentials
 };

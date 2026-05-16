@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../supabaseClient";
 import { getSession, logout } from "../lib/auth";
-import { fetchRestaurantForDashboard } from "../lib/restaurantTenant";
+import { resolveRestaurantForDashboard } from "../lib/restaurantTenant";
+import { useDemoTenant } from "../lib/DemoTenantContext";
 import { deliveryMayLoginToday } from "../lib/deliverySchedule";
 import {
   callableCustomerPhone,
@@ -24,6 +25,7 @@ const TODAY_HISTORY_HOURS = 18;
 const REVERT_DELIVERY_WINDOW_MS = 15 * 60 * 1000;
 
 export default function DeliveryApp({ onLogout }) {
+  const { demoSlug } = useDemoTenant();
   const [restaurantId, setRestaurantId] = useState("");
   const [restaurantName, setRestaurantName] = useState("");
   const [deliveryGloballyDisabled, setDeliveryGloballyDisabled] = useState(false);
@@ -98,7 +100,7 @@ export default function DeliveryApp({ onLogout }) {
 
   useEffect(() => {
     async function loadRestaurant() {
-      const { data, error: queryError } = await fetchRestaurantForDashboard(supabase);
+      const { data, error: queryError } = await resolveRestaurantForDashboard(supabase, { demoSlug });
       if (queryError) {
         setError(`Error resolviendo restaurante: ${queryError.message}`);
         return;
@@ -112,7 +114,7 @@ export default function DeliveryApp({ onLogout }) {
       setDeliveryGloballyDisabled(data.delivery_enabled === false);
     }
     loadRestaurant();
-  }, []);
+  }, [demoSlug]);
 
   useEffect(() => {
     if (!restaurantId) return undefined;

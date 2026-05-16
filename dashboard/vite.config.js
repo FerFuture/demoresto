@@ -89,6 +89,33 @@ export default defineConfig(({ mode }) => {
     process.env.VITE_PUBLIC_DASHBOARD_URL,
     fromFiles.VITE_PUBLIC_DASHBOARD_URL
   );
+  const defaultDemoSlug = pick(
+    process.env.VITE_DEFAULT_DEMO_SLUG,
+    fromFiles.VITE_DEFAULT_DEMO_SLUG
+  );
+  /** Valor inicial del campo «Días hasta expiración» en Maestro (1–366). */
+  const defaultDemoExpiresDays = pick(
+    process.env.VITE_DEFAULT_DEMO_EXPIRES_DAYS,
+    fromFiles.VITE_DEFAULT_DEMO_EXPIRES_DAYS
+  );
+  /** Puerto HTTP de index.js (mesa + contraseñas + maestro). En Docker suele ser 3000 interno y 3001 en el host. */
+  const mesaApiPort = pick(process.env.MESA_API_PORT, fromFiles.MESA_API_PORT, "3000");
+  /**
+   * El panel (MaestroPanel) arma URLs con VITE_BACKEND_PORT; el proxy /api debe usar el MISMO puerto
+   * que abre el navegador hacia index.js (p. ej. 3001 si mapeás 3001:3000).
+   */
+  const devProxyPort = pick(
+    process.env.VITE_BACKEND_PORT,
+    fromFiles.VITE_BACKEND_PORT,
+    mesaApiPort,
+    "3000"
+  );
+  /** En Docker (Vite en contenedor): VITE_DEV_API_PROXY_TARGET=http://restobot:3000 (nombre del servicio). */
+  const devApiProxyTarget = pick(
+    process.env.VITE_DEV_API_PROXY_TARGET,
+    fromFiles.VITE_DEV_API_PROXY_TARGET,
+    `http://127.0.0.1:${devProxyPort}`
+  );
 
   const isVercelBuild = Boolean(process.env.VERCEL);
   if (isVercelBuild && mode === "production" && (!supabaseUrl || !supabaseKey)) {
@@ -103,7 +130,14 @@ export default defineConfig(({ mode }) => {
     envDir: envDirResolved,
     server: {
       host: "0.0.0.0",
-      port: 5173
+      port: 5173,
+      // El panel llama POST /api/... al mismo origin; sin esto, Vite dev (5173) devolvía 404 para /api/maestro/create-demo.
+      proxy: {
+        "/api": {
+          target: devApiProxyTarget,
+          changeOrigin: true
+        }
+      }
     },
     define: {
       ...defineIfPresent("import.meta.env.VITE_SUPABASE_URL", supabaseUrl),
@@ -113,7 +147,9 @@ export default defineConfig(({ mode }) => {
       ...defineIfPresent("import.meta.env.VITE_DELIVERY_PASSWORD", deliveryPw),
       ...defineIfPresent("import.meta.env.VITE_MAESTRO_PASSWORD", maestroPw),
       ...defineIfPresent("import.meta.env.VITE_MESA_QR_SECRET", mesaQrSecret),
-      ...defineIfPresent("import.meta.env.VITE_PUBLIC_DASHBOARD_URL", publicDashboardUrl)
+      ...defineIfPresent("import.meta.env.VITE_PUBLIC_DASHBOARD_URL", publicDashboardUrl),
+      ...defineIfPresent("import.meta.env.VITE_DEFAULT_DEMO_SLUG", defaultDemoSlug),
+      ...defineIfPresent("import.meta.env.VITE_DEFAULT_DEMO_EXPIRES_DAYS", defaultDemoExpiresDays)
     }
   };
 });
