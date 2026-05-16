@@ -223,6 +223,8 @@ async function loginWithTableUser(username, password, tenantCtx = {}) {
     .eq("username", norm);
   if (restaurantId) {
     q = q.eq("restaurant_id", restaurantId);
+  } else {
+    q = q.is("restaurant_id", null);
   }
   const { data, error } = await q.maybeSingle();
 
@@ -343,6 +345,15 @@ export async function login(p) {
   }
   if (p?.role) {
     return loginWithEnvPassword(p.role, p.password, tenantCtx);
+  }
+  const strictRoot =
+    String(import.meta.env.VITE_DEMO_HOST_STRICT_LOGIN || "").trim() === "1";
+  if (strictRoot && (!demoSlugInput || String(demoSlugInput).trim() === "")) {
+    return {
+      ok: false,
+      error:
+        "Ingresá el usuario que te dieron. Para tu demo usá el enlace con /d/tu-slug/login (no podés entrar solo con contraseña en esta pantalla)."
+    };
   }
   return loginWithEnvPasswordMatchAnyRole(p.password, tenantCtx);
 }

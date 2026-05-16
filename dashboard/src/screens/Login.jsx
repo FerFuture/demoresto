@@ -50,7 +50,15 @@ export default function Login({ onLoggedIn, sessionNotice = "", demoSlugFromRout
                 o solo contraseña de acceso
               </>
             ) : (
-              "Usuario y contraseña, o solo contraseña de acceso"
+              <>
+                Usuario y contraseña, o solo contraseña de acceso
+                {String(import.meta.env.VITE_DEMO_HOST_STRICT_LOGIN || "").trim() === "1" ? (
+                  <span className="block mt-2 text-amber-200/90 text-xs font-normal">
+                    En este sitio hace falta <strong>usuario</strong> en esta pantalla. Para un demo usá el enlace{" "}
+                    <span className="font-mono text-emerald-400/90">/d/…/login</span> que te compartieron.
+                  </span>
+                ) : null}
+              </>
             )}
           </p>
           {(effectiveSlug ||

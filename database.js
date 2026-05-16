@@ -78,6 +78,10 @@ async function verifyDashboardUserCredentials({ username, password, restaurantId
     .eq("username", norm);
   if (rid) {
     q = q.eq("restaurant_id", rid);
+  } else {
+    // Login en `/login` (sin slug): solo cuentas “legado” sin tenant. Los usuarios de demos/locales
+    // tienen `restaurant_id` y deben entrar por `/d/{slug}/login` para no cruzar credenciales.
+    q = q.is("restaurant_id", null);
   }
   const { data, error } = await q.maybeSingle();
 
@@ -481,6 +485,22 @@ function formatSupabaseErrHint(err) {
   return "";
 }
 
+/** Metadata del restaurante demo: no heredar URL base de la plantilla (rompe QR/carta); habilitar módulos públicos. */
+function metadataForDemoTenant(templateMetadata) {
+  const base = coerceMetadataForRestaurantInsert(templateMetadata);
+  if (typeof base !== "object" || base === null || Array.isArray(base)) {
+    return { mesa_qr_enabled: true, qr_menu_enabled: true };
+  }
+  const out = { ...base };
+  delete out.public_dashboard_base_url;
+  out.mesa_qr_enabled = true;
+  out.qr_menu_enabled = true;
+  if ("mesa_qr_blocked_tables" in out) {
+    out.mesa_qr_blocked_tables = [];
+  }
+  return out;
+}
+
 /**
  * Clona un restaurante plantilla + filas de menú y (opcional) un usuario admin del dashboard.
  * Usa service role (solo desde proceso Node).
@@ -595,7 +615,7 @@ async function createDemoFromTemplate({
       Number.isFinite(Number(template.table_count)) && Number(template.table_count) >= 1
         ? Math.floor(Number(template.table_count))
         : 12,
-    metadata: coerceMetadataForRestaurantInsert(template.metadata),
+    metadata: metadataForDemoTenant(template.metadata),
     demo_slug: slug,
     demo_expires_at: expiresIso,
     is_demo: true
@@ -680,6 +700,89 @@ async function createDemoFromTemplate({
   }
 }
 
+function isUuidString(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || "").trim());
+}
+
+/**
+ * Borra un tenant demo (pedidos, interacciones, menú, usuarios vía cascade) y la fila en `restaurants`.
+ * Solo acepta filas con `is_demo === true` (no toca plantillas ni clientes reales).
+ *
+ * Preferí `restaurantId` (UUID) desde el panel Maestro; si no, `demoSlug`.
+ */
+async function deleteDemoBySlug({ demoSlug: demoSlugRaw, restaurantId: restaurantIdRaw }) {
+  const ridIn = String(restaurantIdRaw || "").trim();
+  let row;
+  let resolvedSlug = "";
+
+  if (isUuidString(ridIn)) {
+    const { data, error: selErr } = await supabase
+      .from(TABLES.restaurants)
+      .select("id, is_demo, demo_slug, name")
+      .eq("id", ridIn)
+      .maybeSingle();
+    if (selErr) {
+      throw new Error(`No se pudo buscar el restaurante: ${selErr.message}${formatSupabaseErrHint(selErr)}`);
+    }
+    row = data;
+    resolvedSlug = normalizeDemoSlug(row?.demo_slug || "");
+  } else {
+    const slug = normalizeDemoSlug(demoSlugRaw);
+    if (!slug || slug.length < 2) {
+      throw new Error("Falta el id del restaurante demo o un demo_slug válido.");
+    }
+    const { data, error: selErr } = await supabase
+      .from(TABLES.restaurants)
+      .select("id, is_demo, demo_slug, name")
+      .eq("demo_slug", slug)
+      .maybeSingle();
+    if (selErr) {
+      throw new Error(`No se pudo buscar el demo: ${selErr.message}${formatSupabaseErrHint(selErr)}`);
+    }
+    row = data;
+    resolvedSlug = slug;
+  }
+
+  if (!row?.id) {
+    throw new Error(
+      isUuidString(ridIn)
+        ? "No existe restaurante con ese id."
+        : "No existe un restaurante con ese demo_slug."
+    );
+  }
+  if (!row.is_demo) {
+    throw new Error(
+      "Ese local no está marcado como demo (is_demo). Por seguridad solo se eliminan demos creados como tal."
+    );
+  }
+
+  const rid = row.id;
+
+  const { error: intErr } = await supabase.from(TABLES.interactions).delete().eq("restaurant_id", rid);
+  if (intErr) {
+    throw new Error(`No se pudo borrar bot_interactions: ${intErr.message}${formatSupabaseErrHint(intErr)}`);
+  }
+  const { error: ordErr } = await supabase.from(TABLES.orders).delete().eq("restaurant_id", rid);
+  if (ordErr) {
+    throw new Error(`No se pudo borrar orders: ${ordErr.message}${formatSupabaseErrHint(ordErr)}`);
+  }
+  const { error: menuErr } = await supabase.from(TABLES.menuItems).delete().eq("restaurant_id", rid);
+  if (menuErr) {
+    throw new Error(`No se pudo borrar menu_items: ${menuErr.message}${formatSupabaseErrHint(menuErr)}`);
+  }
+
+  const { error: delErr } = await supabase.from(TABLES.restaurants).delete().eq("id", rid);
+  if (delErr) {
+    throw new Error(`No se pudo borrar el restaurante: ${delErr.message}${formatSupabaseErrHint(delErr)}`);
+  }
+
+  return {
+    deletedRestaurantId: rid,
+    demoSlug: resolvedSlug || String(row.demo_slug || "").trim(),
+    name: String(row.name || row.demo_slug || "").trim() || resolvedSlug || rid
+  };
+}
+
 async function getOrderAwaitingCustomerTotalConfirm({ restaurantId, customerNumber, botNumber }) {
   const botVariants = botNumberVariantsForQuery(botNumber);
   if (!botVariants.length) return null;
@@ -717,5 +820,6 @@ module.exports = {
   getRestaurantNameById,
   getOrderAwaitingCustomerTotalConfirm,
   createDemoFromTemplate,
+  deleteDemoBySlug,
   verifyDashboardUserCredentials
 };

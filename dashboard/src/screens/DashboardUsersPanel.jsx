@@ -82,6 +82,10 @@ export default function DashboardUsersPanel({ restaurantId = "", scopeByRestaura
       );
     if (scopeByRestaurant && rid) {
       q = q.eq("restaurant_id", rid);
+    } else if (rid) {
+      // /admin sin slug de demo: solo usuarios de ESTE restaurante + legado (restaurant_id null).
+      // Sin esto se listan admins de otros demos en el panel del local principal.
+      q = q.or(`restaurant_id.eq.${rid},restaurant_id.is.null`);
     }
     const { data, error: qErr } = await q.order("created_at", { ascending: false });
     setLoading(false);
@@ -145,7 +149,7 @@ export default function DashboardUsersPanel({ restaurantId = "", scopeByRestaura
           : null,
       updated_at: new Date().toISOString()
     };
-    if (scopeByRestaurant && rid) {
+    if (rid) {
       insertRow.restaurant_id = rid;
     }
     const { error: insErr } = await supabase.from(TABLE).insert(insertRow);

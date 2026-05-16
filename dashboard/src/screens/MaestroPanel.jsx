@@ -7,6 +7,7 @@ import { resolvePublicDashboardBaseUrl } from "../lib/publicDashboardUrl";
 import { buildRestobotHttpApiCandidates } from "../lib/restobotHttpApi";
 
 const MAESTRO_CREATE_DEMO_PATH = "/api/maestro/create-demo";
+const MAESTRO_DELETE_DEMO_PATH = "/api/maestro/delete-demo";
 const DEMO_CREATE_TIMEOUT_MS = 45000;
 
 function readDefaultDemoExpiresDaysFromEnv() {
@@ -74,8 +75,12 @@ export default function MaestroPanel({
   const [demoWhatsapp, setDemoWhatsapp] = useState("");
   const [demoMaestroPass, setDemoMaestroPass] = useState("");
   const [demoCreating, setDemoCreating] = useState(false);
+  const [demoDeleting, setDemoDeleting] = useState(false);
   const [demoError, setDemoError] = useState("");
+  const [demoDeleteError, setDemoDeleteError] = useState("");
   const [demoOk, setDemoOk] = useState(null);
+  const [deleteDemoRestaurantId, setDeleteDemoRestaurantId] = useState("");
+  const [templateListVersion, setTemplateListVersion] = useState(0);
   const [templateOptions, setTemplateOptions] = useState([]);
   const [templateListLoading, setTemplateListLoading] = useState(true);
   const [templateListError, setTemplateListError] = useState("");
@@ -94,7 +99,7 @@ export default function MaestroPanel({
       setTemplateListError("");
       const { data, error } = await supabase
         .from("restaurants")
-        .select("id, name, public_name, demo_slug")
+        .select("id, name, public_name, demo_slug, is_demo")
         .order("name");
       if (cancelled) return;
       setTemplateListLoading(false);
@@ -118,7 +123,8 @@ export default function MaestroPanel({
         return {
           id: r.id,
           label: dup ? `${baseLabel} · ${String(r.id).slice(0, 8)}…` : baseLabel,
-          demoSlug: demoSlug || null
+          demoSlug: demoSlug || null,
+          isDemo: Boolean(r.is_demo)
         };
       });
       opts.sort((a, b) => a.label.localeCompare(b.label, "es", { sensitivity: "base" }));
@@ -127,7 +133,7 @@ export default function MaestroPanel({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [templateListVersion]);
 
   useEffect(() => {
     if (!restaurantId || templateOptions.length === 0) return;
@@ -150,6 +156,11 @@ export default function MaestroPanel({
   const selectedTemplateOption = useMemo(
     () => templateOptions.find((o) => o.id === demoTemplateId) ?? null,
     [templateOptions, demoTemplateId]
+  );
+
+  const demoDeleteOptions = useMemo(
+    () => templateOptions.filter((o) => o.isDemo && o.demoSlug),
+    [templateOptions]
   );
   const templateDemoLoginUrl = useMemo(() => {
     const slug = selectedTemplateOption?.demoSlug;
@@ -463,6 +474,7 @@ export default function MaestroPanel({
         setDemoOk({ ...json, loginUrl });
         setDemoAdminPass("");
         setDemoMaestroPass("");
+        setTemplateListVersion((v) => v + 1);
         return;
       }
       const hint404 =
@@ -475,11 +487,101 @@ export default function MaestroPanel({
     }
   }
 
+  async function submitDeleteDemo() {
+    if (demoDeleting || demoCreating) return;
+    setDemoDeleteError("");
+    setLocalOk("");
+    const opt = demoDeleteOptions.find((o) => o.id === deleteDemoRestaurantId);
+    if (!opt?.demoSlug) {
+      setDemoDeleteError("Elegí un demo de la lista (solo aparecen filas con is_demo y slug).");
+      return;
+    }
+    const masterP = String(demoMaestroPass || "");
+    if (!masterP) {
+      setDemoDeleteError("Ingresá la contraseña maestro (la misma que usás para crear demos).");
+      return;
+    }
+    const slug = String(opt.demoSlug).trim();
+    const confirmMsg = [
+      `¿Eliminar permanentemente el demo "${opt.label}"?`,
+      "",
+      `URL: /d/${slug}/`,
+      "",
+      "Se borrarán pedidos, interacciones del bot, ítems de menú y el restaurante (los usuarios del panel de ese local se eliminan en cascada).",
+      "",
+      "Esta acción no se puede deshacer."
+    ].join("\n");
+    if (!window.confirm(confirmMsg)) return;
+
+    const urls = buildRestobotHttpApiCandidates(MAESTRO_DELETE_DEMO_PATH);
+    if (!urls.length) {
+      setDemoDeleteError(
+        "No hay URL de backend permitida desde este navegador. Configurá VITE_MESA_API_BASE_URL (HTTPS) o probá en local."
+      );
+      return;
+    }
+
+    const body = { maestroPassword: masterP, demoSlug: slug, restaurantId: opt.id };
+    setDemoDeleting(true);
+    let lastErr = "No se pudo contactar el servidor.";
+    try {
+      for (const url of urls) {
+        let res;
+        try {
+          res = await fetchWithTimeout(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+          });
+        } catch (e) {
+          lastErr = e?.name === "AbortError" ? "Tiempo de espera agotado al contactar el backend." : e?.message || lastErr;
+          continue;
+        }
+        const text = await res.text();
+        let json;
+        try {
+          json = text ? JSON.parse(text) : {};
+        } catch {
+          const snippet = String(text || "").trim().slice(0, 240);
+          json = { error: snippet || res.statusText || "Respuesta no JSON del servidor" };
+        }
+        if (!res.ok) {
+          lastErr = json.error || res.statusText || lastErr;
+          if (res.status === 403 || res.status === 503 || res.status === 400 || res.status === 404) {
+            let errOut = lastErr;
+            if (res.status === 404) {
+              const le = String(lastErr || "");
+              const fromApi = /no existe|no está marcado|demo_slug|inválid|marcado como demo/i.test(le);
+              if (!fromApi) {
+                errOut = `${lastErr} Si la consola muestra solo «Not Found» sin mensaje JSON de la API, el backend no tiene desplegado POST /api/maestro/delete-demo (en la VPS: git pull, docker compose build restobot, docker compose up -d; en Vercel: redeploy).`;
+              }
+            }
+            setDemoDeleteError(errOut);
+            return;
+          }
+          continue;
+        }
+        setDeleteDemoRestaurantId("");
+        setDemoMaestroPass("");
+        if (String(demoTemplateId || "") === String(json.deletedRestaurantId || "")) {
+          setDemoTemplateId("");
+        }
+        setTemplateListVersion((v) => v + 1);
+        setLocalOk(`Demo eliminado: /d/${json.demoSlug}/ (${json.name || json.demoSlug}).`);
+        return;
+      }
+      setDemoDeleteError(lastErr);
+    } finally {
+      setDemoDeleting(false);
+    }
+  }
+
   const busy =
     savingDelivery ||
     savingTables ||
     savingDashboardBase ||
     demoCreating ||
+    demoDeleting ||
     !restaurantId ||
     loadingRestaurant;
 
@@ -545,7 +647,12 @@ export default function MaestroPanel({
         </p>
         <p className="text-xs text-cyan-200/70">
           En Vercel, el POST se reenvía con <code className="text-[11px]">MESA_API_PROXY_ORIGIN</code> igual que los pedidos
-          QR y el recetario IA.
+          QR y el recetario IA. Los invitados del demo entran con su enlace{" "}
+          <code className="text-[11px]">/d/slug/login</code>: en <code className="text-[11px]">/login</code> sin slug no
+          aplican sus usuarios de base (solo cuentas legado sin <code className="text-[11px]">restaurant_id</code>). Si
+          además querés bloquear el acceso <em>solo con contraseña</em> del <code className="text-[11px]">.env</code> en
+          esa pantalla, es opcional <code className="text-[11px]">VITE_DEMO_HOST_STRICT_LOGIN=1</code> (no hace falta si
+          vos entrás así al panel principal para revisar demos).
         </p>
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -696,6 +803,11 @@ export default function MaestroPanel({
               className="h-10 w-full rounded-lg border border-cyan-800/60 bg-slate-950 px-3 text-sm text-slate-100 disabled:opacity-50"
               autoComplete="off"
             />
+            <span className="block text-[11px] text-cyan-200/60 leading-snug">
+              Este usuario queda ligado al restaurante del demo: solo puede entrar por{" "}
+              <code className="text-[10px]">{"/d/{slug}/login"}</code>, no por el login general{" "}
+              <code className="text-[10px]">/login</code> (así no se cruza con el panel principal).
+            </span>
           </label>
           <label className="block space-y-1 text-sm">
             <span className="text-cyan-200/90">Contraseña admin (nueva)</span>
@@ -714,7 +826,7 @@ export default function MaestroPanel({
               type="password"
               value={demoMaestroPass}
               onChange={(e) => setDemoMaestroPass(e.target.value)}
-              disabled={demoCreating}
+              disabled={demoCreating || demoDeleting}
               className="h-10 w-full max-w-md rounded-lg border border-cyan-800/60 bg-slate-950 px-3 text-sm text-slate-100 disabled:opacity-50"
               autoComplete="off"
             />
@@ -731,6 +843,21 @@ export default function MaestroPanel({
             <p>Demo listo: slug {demoOk.demoSlug}</p>
             <p className="text-xs break-all">
               Login: <span className="font-mono text-emerald-200">{demoOk.loginUrl}</span>
+            </p>
+            <p className="text-xs text-emerald-200/85 leading-relaxed">
+              Carta y pedidos por mesa (mismo menú clonado, aislado de la plantilla):{" "}
+              <span className="font-mono text-emerald-200/90">
+                {String(effectiveDashboardBase || (typeof window !== "undefined" ? window.location.origin : "") || "")
+                  .replace(/\/$/, "")}
+                /d/{demoOk.demoSlug}/carta?mesa=1
+              </span>
+              {" · "}
+              <span className="font-mono text-emerald-200/90">
+                {String(effectiveDashboardBase || (typeof window !== "undefined" ? window.location.origin : "") || "")
+                  .replace(/\/$/, "")}
+                /d/{demoOk.demoSlug}/menu
+              </span>{" "}
+              (QR desde el admin del demo: pestañas QR Menú y Carta y QR mesas).
             </p>
             <p className="text-xs text-emerald-200/80">
               Platos copiados: {demoOk.menuItemCount ?? "—"} · expira: {demoOk.demoExpiresAt || "—"}
@@ -759,6 +886,68 @@ export default function MaestroPanel({
         >
           {demoCreating ? "Creando demo…" : "Crear demo"}
         </button>
+
+        <div className="border-t border-rose-500/25 pt-4 mt-1 space-y-3">
+          <h4 className="text-sm font-semibold text-rose-100">Eliminar demo</h4>
+          <p className="text-xs text-rose-100/80 leading-relaxed">
+            Quitá demos que ya no necesitás para que no se acumulen en la base antes del vencimiento. Solo aparecen
+            locales con <code className="text-[10px]">is_demo = true</code> y slug; no se puede borrar una plantilla ni
+            un cliente sin ese flag.
+          </p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+            <div className="min-w-0 max-w-xl flex-1 space-y-1">
+              <span className="block text-xs text-rose-200/90">Demo a eliminar</span>
+              <div className="relative">
+                <select
+                  value={deleteDemoRestaurantId}
+                  onChange={(e) => {
+                    setDeleteDemoRestaurantId(e.target.value);
+                    setDemoDeleteError("");
+                  }}
+                  disabled={demoDeleting || demoCreating || templateListLoading || demoDeleteOptions.length === 0}
+                  aria-label="Elegir demo para eliminar"
+                  className="h-10 w-full cursor-pointer appearance-none rounded-lg border border-rose-800/50 bg-slate-950 pl-3 pr-10 text-sm text-slate-100 shadow-sm transition-colors hover:border-rose-600/40 focus:border-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-500/30 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <option value="">Elegí un demo…</option>
+                  {demoDeleteOptions.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.label} · /d/{o.demoSlug}/
+                    </option>
+                  ))}
+                </select>
+                <span
+                  className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-rose-400/70"
+                  aria-hidden
+                >
+                  <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                    <path
+                      fillRule="evenodd"
+                      d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={demoDeleting || demoCreating || !deleteDemoRestaurantId}
+              onClick={() => void submitDeleteDemo()}
+              className="h-10 shrink-0 rounded-lg border border-rose-500/50 bg-rose-900/40 px-4 text-sm font-semibold text-rose-50 hover:bg-rose-800/50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {demoDeleting ? "Eliminando…" : "Eliminar demo"}
+            </button>
+          </div>
+          <p className="text-[11px] text-rose-200/60">
+            Usá la misma <strong className="text-rose-100/90">contraseña maestro</strong> que en el formulario de arriba
+            (se envía al backend con el POST).
+          </p>
+          {demoDeleteError ? (
+            <p className="text-sm text-rose-300" role="alert">
+              {demoDeleteError}
+            </p>
+          ) : null}
+        </div>
       </div>
 
       <div className="rounded-xl border border-slate-700 bg-slate-900 p-6 space-y-5">
