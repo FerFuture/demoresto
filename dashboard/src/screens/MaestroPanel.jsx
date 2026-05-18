@@ -47,6 +47,7 @@ export default function MaestroPanel({
   cashEnabled,
   mercadoPagoEnabled,
   statsEnabled,
+  statsMetricsConfigurable,
   stockPanelEnabled,
   tableCount,
   restaurantMetadata,
@@ -58,6 +59,7 @@ export default function MaestroPanel({
   onWaiterFulfillmentSelectorToggle,
   onBotRuntimeSwitchesVisibleToggle,
   onStockPanelToggle,
+  onStatsMetricsConfigurableToggle,
   onPublicDashboardBaseUrlSave
 }) {
   const [savingDelivery, setSavingDelivery] = useState(false);
@@ -347,6 +349,28 @@ export default function MaestroPanel({
       return;
     }
     setLocalOk(nextEnabled ? "Gestor de stock visible en el dashboard." : "Gestor de stock oculto en el dashboard.");
+  }
+
+  async function setStatsMetricsConfigurableFlag(nextEnabled) {
+    if (savingDelivery || savingTables) return;
+    if (typeof onStatsMetricsConfigurableToggle !== "function") {
+      setLocalError("No se pudo actualizar configuración de estadísticas.");
+      return;
+    }
+    setLocalError("");
+    setLocalOk("");
+    setSavingDelivery(true);
+    const result = await onStatsMetricsConfigurableToggle(Boolean(nextEnabled));
+    setSavingDelivery(false);
+    if (!result?.ok) {
+      setLocalError("No se pudo guardar configurabilidad de estadísticas.");
+      return;
+    }
+    setLocalOk(
+      nextEnabled
+        ? "Configuración y exportación CSV habilitadas en Estadísticas."
+        : "Estadísticas fijadas (7 / 30 días) sin configuración ni CSV."
+    );
   }
 
   async function copyRestartCommand() {
@@ -1272,6 +1296,56 @@ export default function MaestroPanel({
                 />
               </button>
               <span className={`w-9 text-center text-xs font-bold uppercase tracking-wide ${statsEnabled ? "text-emerald-300" : "text-slate-500"}`}>
+                On
+              </span>
+            </div>
+            </div>
+
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-slate-200">Configurar métricas en Estadísticas</p>
+              <p className="mt-1 text-xs text-slate-500">
+                {statsMetricsConfigurable
+                  ? "ON · Configuración de períodos, exportar CSV y atajos visibles en Estadísticas."
+                  : "OFF · Fijado: ventas 7 días y top 5 en 30 días; sin configuración ni descarga CSV."}
+              </p>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-3 sm:gap-4">
+              <span
+                className={`w-9 text-center text-xs font-bold uppercase tracking-wide ${statsMetricsConfigurable ? "text-slate-500" : "text-rose-300"}`}
+              >
+                Off
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={statsMetricsConfigurable}
+                aria-label={
+                  statsMetricsConfigurable
+                    ? "Configuración de métricas activada. Pulsa para fijar valores por defecto."
+                    : "Configuración de métricas desactivada. Pulsa para permitir ajustes en el panel."
+                }
+                disabled={busy || !statsEnabled}
+                onClick={() => setStatsMetricsConfigurableFlag(!statsMetricsConfigurable)}
+                className={[
+                  "relative h-10 w-[4.5rem] shrink-0 rounded-full border border-slate-600/80 transition-colors duration-200",
+                  statsMetricsConfigurable ? "bg-emerald-600" : "bg-slate-700",
+                  busy || !statsEnabled ? "cursor-not-allowed opacity-50" : "cursor-pointer",
+                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900"
+                ].join(" ")}
+              >
+                <span
+                  aria-hidden
+                  className={[
+                    "absolute top-1 left-1 block h-8 w-8 rounded-full bg-white shadow-md ring-1 ring-black/10 transition-transform duration-200 ease-out",
+                    statsMetricsConfigurable ? "translate-x-8" : "translate-x-0"
+                  ].join(" ")}
+                />
+              </button>
+              <span
+                className={`w-9 text-center text-xs font-bold uppercase tracking-wide ${statsMetricsConfigurable ? "text-emerald-300" : "text-slate-500"}`}
+              >
                 On
               </span>
             </div>

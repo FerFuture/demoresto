@@ -28,6 +28,11 @@ import {
   tableNumberLabel
 } from "../lib/format";
 import AdminStats from "./AdminStats";
+import {
+  buildStatsMetadataPatch,
+  resolveStatsConfig,
+  statsDraftToMetadata
+} from "../lib/statsConfig";
 import DashboardUsersPanel from "./DashboardUsersPanel";
 import MaestroPanel from "./MaestroPanel";
 import MesaQrLinksPanel from "../components/MesaQrLinksPanel";
@@ -458,6 +463,8 @@ export default function AdminApp({ onLogout }) {
   const [confirmDialog, setConfirmDialog] = useState(null);
   const confirmResolverRef = useRef(null);
   const ordersCalendarDayRef = useRef(localDateKey());
+
+  const statsConfig = useMemo(() => resolveStatsConfig(restaurantMetadata), [restaurantMetadata]);
 
   useEffect(() => {
     if (activeTab === "stats" && !statsEnabled) setActiveTab("orders");
@@ -1080,6 +1087,51 @@ export default function AdminApp({ onLogout }) {
     }
     setRestaurantMetadata(nextMetadata);
     setStockPanelEnabled(Boolean(nextEnabled));
+    return { ok: true };
+  }
+
+  async function saveStatsMetricsConfig(draft) {
+    if (!restaurantId) {
+      setError("No hay restaurante cargado.");
+      return { ok: false };
+    }
+    const metadataPatch = statsDraftToMetadata(draft);
+    if (!metadataPatch || !Object.keys(metadataPatch).length) {
+      setError("Revisá el rango de fechas (desde / hasta) antes de guardar.");
+      return { ok: false };
+    }
+    setError("");
+    const nextMetadata = buildStatsMetadataPatch(restaurantMetadata, metadataPatch);
+    const { error: updateError } = await supabase
+      .from("restaurants")
+      .update({ metadata: nextMetadata })
+      .eq("id", restaurantId);
+    if (updateError) {
+      setError(`No se pudo guardar configuración de estadísticas: ${updateError.message}`);
+      return { ok: false, error: updateError };
+    }
+    setRestaurantMetadata(nextMetadata);
+    return { ok: true };
+  }
+
+  async function setStatsMetricsConfigurableFlag(nextEnabled) {
+    if (!restaurantId) {
+      setError("No hay restaurante cargado.");
+      return { ok: false };
+    }
+    setError("");
+    const nextMetadata = buildStatsMetadataPatch(restaurantMetadata, {
+      stats_metrics_configurable: Boolean(nextEnabled)
+    });
+    const { error: updateError } = await supabase
+      .from("restaurants")
+      .update({ metadata: nextMetadata })
+      .eq("id", restaurantId);
+    if (updateError) {
+      setError(`No se pudo guardar configurabilidad de estadísticas: ${updateError.message}`);
+      return { ok: false, error: updateError };
+    }
+    setRestaurantMetadata(nextMetadata);
     return { ok: true };
   }
 
@@ -1953,7 +2005,7 @@ export default function AdminApp({ onLogout }) {
 
   return (
     <div className="dark min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto max-w-7xl p-6">
+      <div className="mx-auto max-w-7xl p-4 sm:p-6">
         <header className="mb-6 flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold">Mesafood</h1>
@@ -3081,7 +3133,14 @@ export default function AdminApp({ onLogout }) {
         ) : activeTab === "stock" && stockPanelEnabled ? (
           <StockManagerPanel restaurantId={restaurantId} onLowStockCountChange={setLowStockAlertCount} />
         ) : activeTab === "stats" && statsEnabled ? (
-          <AdminStats restaurantId={restaurantId} />
+          <div className="min-w-0 max-w-full">
+            <AdminStats
+              restaurantId={restaurantId}
+              statsConfig={statsConfig}
+              metricsConfigurable={statsConfig.metricsConfigurable}
+              onSaveStatsConfig={saveStatsMetricsConfig}
+            />
+          </div>
         ) : activeTab === "users" ? (
           <DashboardUsersPanel
             restaurantId={restaurantId}
@@ -3113,6 +3172,8 @@ export default function AdminApp({ onLogout }) {
             onWaiterFulfillmentSelectorToggle={setWaiterFulfillmentSelectorFlag}
             onBotRuntimeSwitchesVisibleToggle={setBotRuntimeSwitchesVisibleFlag}
             onStockPanelToggle={setStockPanelEnabledFlag}
+            statsMetricsConfigurable={statsConfig.metricsConfigurable}
+            onStatsMetricsConfigurableToggle={setStatsMetricsConfigurableFlag}
             restaurantMetadata={restaurantMetadata}
             onPublicDashboardBaseUrlSave={savePublicDashboardBaseUrl}
           />
